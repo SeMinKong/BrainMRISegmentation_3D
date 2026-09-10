@@ -30,7 +30,7 @@ LABEL_PRESETS = {
 MODALITY_ALIASES = {
     "t1": "t1n", "t1n": "t1n", "t1ce": "t1c", "t1gd": "t1c", "t1c": "t1c",
     "t2": "t2w", "t2w": "t2w", "flair": "t2f", "t2f": "t2f",
-    "seg": "seg", "mask": "seg", "segmentation": "seg",
+    "seg": "seg", "mask": "seg", "segmentation": "seg", "tumormask": "seg",
 }
 
 

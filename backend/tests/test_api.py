@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import gzip
 import json
 from pathlib import Path
 import time
@@ -134,11 +135,42 @@ def test_import_rejects_mismatched_shape_and_affine(client):
 
 
 @pytest.mark.parametrize("bad_label", [1.5, 5, -1])
-def test_invalid_segmentation_labels_rejected(client, bad_label):
+@pytest.mark.parametrize("mask_suffix", ["seg", "tumorMask"])
+def test_invalid_segmentation_labels_rejected(client, bad_label, mask_suffix):
     bad = np.ones((12, 14, 10), dtype=np.float32) * bad_label
-    result = import_files(client, [("subject_t1n.nii", nifti_bytes()), ("subject_seg.nii", nifti_bytes(bad))])
+    result = import_files(client, [("subject_t1n.nii", nifti_bytes()), (f"subject_{mask_suffix}.nii", nifti_bytes(bad))])
     assert result.status_code == 422
     assert "integer labels" in result.json()["detail"]
+
+
+def test_release_filenames_import_four_modalities_and_reference_mask(client, tmp_path):
+    case_id = "PatientID_0003_Timepoint_1"
+    mask = np.zeros((12, 14, 10), dtype=np.uint8)
+    mask[2:5, 4:7, 3:6] = 4
+    images = [(f"{case_id}_brain_{modality}.nii.gz", gzip.compress(nifti_bytes()))
+              for modality in ("t1n", "t1c", "t2w", "t2f")]
+    images.append((f"{case_id}_tumorMask.nii.gz", gzip.compress(nifti_bytes(mask))))
+
+    result = import_files(client, images)
+
+    assert result.status_code == 201, result.text
+    case = result.json()
+    assert set(case["modalities"]) == {"t1n", "t1c", "t2w", "t2f"}
+    assert [seg["id"] for seg in case["segmentations"]] == ["reference"]
+    download = client.get(f"/api/cases/{case['id']}/segmentations/reference/download")
+    assert download.status_code == 200
+    path = tmp_path / "reference.nii.gz"
+    path.write_bytes(download.content)
+    np.testing.assert_array_equal(nib.load(path).get_fdata(), mask)
+
+
+def test_release_mask_and_seg_alias_are_rejected_as_duplicate_masks(client):
+    mask = np.zeros((12, 14, 10), dtype=np.uint8)
+    result = import_files(client, [("subject_brain_t1n.nii", nifti_bytes()),
+                                   ("subject_tumorMask.nii", nifti_bytes(mask)),
+                                   ("subject_seg.nii", nifti_bytes(mask))])
+    assert result.status_code == 422
+    assert "Duplicate/ambiguous modality 'seg'" in result.json()["detail"]
 
 
 def test_generic_semantics_are_explicit(client):

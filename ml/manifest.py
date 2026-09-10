@@ -1,7 +1,8 @@
 """Discover NIfTI cases using explicit filename and patient identity conventions.
 
-This optional helper handles <case>_seg or <case>-seg naming. Use a manually
-reviewed manifest for other layouts; no dataset release naming is assumed.
+This optional helper handles <case>_seg / <case>-seg and the observed
+<case>_tumorMask with <case>_brain_<modality> naming. Patient identity still
+requires an explicit regex; use a manually reviewed manifest for other layouts.
 """
 from __future__ import annotations
 
@@ -32,19 +33,22 @@ def main(argv=None):
     pattern = re.compile(args.patient_regex)
     if pattern.groups != 1:
         raise ValueError("patient-regex must contain exactly one capture group for the patient ID")
-    cases = []
-    for label in sorted(args.data_root.rglob("*seg.nii*")):
-        match = re.fullmatch(r"(.+)[_-]seg\.(nii|nii\.gz)", label.name)
+    cases, identifiers = [], set()
+    for label in sorted(args.data_root.rglob("*.nii*")):
+        match = re.fullmatch(r"(.+)[_-](?:seg|tumorMask)\.(?:nii|nii\.gz)", label.name, re.IGNORECASE)
         if not match:
             continue
         case_id = match.group(1)
+        if case_id in identifiers:
+            raise ValueError(f"Duplicate case_id or multiple segmentation files for {case_id}")
+        identifiers.add(case_id)
         patient = pattern.fullmatch(case_id)
         if patient is None or not patient.group(1) or not patient.group(1).strip():
             raise ValueError(f"Cannot derive patient ID for {case_id}; supply --patient-regex with one capture group")
         modalities = {}
         for name, suffixes in {"t1": ("t1n", "t1"), "t1ce": ("t1c", "t1ce"), "t2": ("t2w", "t2"), "flair": ("t2f", "flair")}.items():
             found = [label.parent / f"{case_id}{separator}{suffix}.{extension}"
-                     for separator in ("_", "-") for suffix in suffixes for extension in ("nii.gz", "nii")]
+                     for separator in ("_", "-", "_brain_") for suffix in suffixes for extension in ("nii.gz", "nii")]
             found = [path for path in found if path.is_file()]
             if len(found) != 1:
                 raise ValueError(f"Expected one {name} volume for {case_id}, found {len(found)}")

@@ -115,6 +115,66 @@ def test_manifest_discovers_both_separators_and_keeps_sessions_together(tmp_path
     assert patient01[0]["split"] != patient02[0]["split"]
 
 
+def create_release_case(root, patient_id, timepoint):
+    directory = root / patient_id / f"Timepoint_{timepoint}"
+    directory.mkdir(parents=True)
+    case_id = f"{patient_id}_Timepoint_{timepoint}"
+    paths = {}
+    for suffix in ("brain_t1n", "brain_t1c", "brain_t2w", "brain_t2f", "tumorMask"):
+        path = directory / f"{case_id}_{suffix}.nii.gz"
+        nib.save(nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)), path)
+        paths[suffix] = path
+    return paths
+
+
+def test_manifest_discovers_release_filenames_without_renaming_and_groups_timepoints(tmp_path):
+    expected = {}
+    for patient_id, timepoint in (("PatientID_0003", 1), ("PatientID_0003", 2), ("PatientID_0004", 1)):
+        expected[f"{patient_id}_Timepoint_{timepoint}"] = create_release_case(tmp_path, patient_id, timepoint)
+    originals = {path: path.read_bytes() for paths in expected.values() for path in paths.values()}
+    output = tmp_path / "manifest.json"
+
+    create_manifest(["--data-root", str(tmp_path), "--output", str(output),
+                     "--patient-regex", r"^(PatientID_\d+)_Timepoint_\d+$"])
+
+    cases = load_manifest(output)["cases"]
+    assert len(cases) == 3
+    for case in cases:
+        paths = expected[case["case_id"]]
+        assert case["modalities"] == {name: str(paths[suffix].resolve()) for name, suffix in
+                                      (("t1", "brain_t1n"), ("t1ce", "brain_t1c"),
+                                       ("t2", "brain_t2w"), ("flair", "brain_t2f"))}
+        assert case["label"] == str(paths["tumorMask"].resolve())
+    patient3 = [case for case in cases if case["patient_id"] == "PatientID_0003"]
+    patient4 = [case for case in cases if case["patient_id"] == "PatientID_0004"]
+    assert len(patient3) == 2 and len(patient4) == 1
+    assert len({case["split"] for case in patient3}) == 1
+    assert patient3[0]["split"] != patient4[0]["split"]
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+@pytest.mark.parametrize("problem,expected_error", [
+    ("missing_modality", "Expected one flair volume.*found 0"),
+    ("duplicate_modality", "Expected one t1 volume.*found 2"),
+    ("duplicate_mask", "Duplicate case_id or multiple segmentation files"),
+])
+def test_release_manifest_rejects_missing_or_ambiguous_files_before_writing(tmp_path, problem, expected_error):
+    paths = create_release_case(tmp_path, "PatientID_0003", 1)
+    if problem == "missing_modality":
+        paths["brain_t2f"].unlink()
+    elif problem == "duplicate_modality":
+        paths["brain_t1n"].with_name("PatientID_0003_Timepoint_1_t1n.nii.gz").write_bytes(paths["brain_t1n"].read_bytes())
+    else:
+        paths["tumorMask"].with_name("PatientID_0003_Timepoint_1_seg.nii.gz").write_bytes(paths["tumorMask"].read_bytes())
+    output = tmp_path / "manifest.json"
+
+    with pytest.raises(ValueError, match=expected_error):
+        create_manifest(["--data-root", str(tmp_path), "--output", str(output),
+                         "--patient-regex", r"^(PatientID_\d+)_Timepoint_\d+$"])
+
+    assert not output.exists()
+
+
 def test_nnunet_export_preserves_explicit_train_val_split(tmp_path):
     from ml.export_nnunet import main as export
 
