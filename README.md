@@ -175,54 +175,122 @@ $env:MRI_DEVICE = "auto"
 
 ## 프로젝트 구조
 
+### GitHub에 포함되는 소스 구조
+
+현재 Git에서 추적하는 **44개 파일 전체**를 표시했습니다. `git ls-files` 목록과 대조했으며, 폴더와 파일 이름은 실제 경로 기준입니다.
+
 ```text
 BrainMRISegmentation_3D/
-├── README.md                       # 실행·UI 사용·데이터·모델 연결
-├── pyproject.toml                  # Python 패키지와 core/dev/ml 의존성
-├── .env.example                    # 모델 경로·데이터 위치 설정 예제
-├── scripts/
-│   ├── setup.ps1                   # 가상환경·의존성 설치·웹 빌드
-│   ├── start.ps1                   # 로컬 API + 빌드된 웹 실행
-│   ├── start-dev.ps1               # API + Vite 개발 서버
-│   ├── audit_mu_glioma_post.py     # 원본 전체 무결성·격자·라벨·중복 검사
-│   └── prepare_mu_glioma_post.py   # 의심 사례 보류·내용 중복을 고려한 분할
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 # FastAPI 라우트·업로드·추론 작업 큐
-│   │   ├── store.py                # 사례/마스크 파일 저장·메타데이터·캐시
-│   │   └── volumes.py              # NIfTI 검증·단면·3D mesh·지표·합성 데모
-│   └── tests/test_api.py           # 업로드·방향·지표·작업·오류 경로 검증
+│   │   ├── __init__.py
+│   │   ├── main.py  # FastAPI 라우트·업로드·추론 작업
+│   │   ├── store.py  # 사례·마스크 저장과 캐시
+│   │   └── volumes.py  # NIfTI 검증·단면·3D mesh·지표
+│   ├── tests/
+│   │   └── test_api.py  # API·공간 좌표·가져오기 테스트
+│   └── __init__.py
+├── configs/
+│   └── manifest.example.json  # 다른 입력 구조를 위한 수동 manifest 예제
+├── docs/
+│   ├── architecture.md  # 데이터 흐름과 계산 정의
+│   ├── data-access.md  # 다운로드·원본 입력·점검·정리
+│   ├── model-study.md  # 모델 공부·학습·nnU-Net 연결
+│   └── verification.md  # 검증 범위와 실행 결과
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx                 # 사례 탐색·결과 비교·모델 상태·업로드 UI
-│   │   ├── api.ts                  # API 타입과 요청 함수
-│   │   ├── styles.css              # 반응형 다크 워크스페이스 스타일
-│   │   └── components/
-│   │       ├── MeshViewer.tsx      # Three.js 3D 표면·종양 분리·회전
-│   │       └── SliceViewer.tsx     # 축상·관상·시상 단면 뷰어
-│   ├── package.json
-│   ├── package-lock.json           # npm 의존성 고정
-│   └── vite.config.ts              # 개발 API 프록시와 프로덕션 빌드
+│   │   ├── components/
+│   │   │   ├── MeshViewer.tsx  # 3D 표면·종양 분리·회전
+│   │   │   └── SliceViewer.tsx  # 축상·관상·시상 단면
+│   │   ├── api.ts  # API 타입과 요청
+│   │   ├── App.tsx  # 사례 탐색·가져오기·결과 비교 UI
+│   │   ├── inferenceJob.ts  # 추론 상태 조회·재시도·요청 취소
+│   │   ├── main.tsx  # React 시작점
+│   │   └── styles.css  # 화면 스타일
+│   ├── tests/
+│   │   └── inferenceJob.test.mjs  # 추론 조회 회귀 테스트
+│   ├── index.html  # 웹 HTML 진입점
+│   ├── package-lock.json  # 고정된 npm 의존성
+│   ├── package.json  # 프런트엔드 의존성·실행 명령
+│   ├── tsconfig.json  # TypeScript 설정
+│   └── vite.config.ts  # 개발 프록시·빌드 설정
 ├── ml/
-│   ├── schema.py                   # 채널·라벨·환자 분할 계약
-│   ├── manifest.py                 # NIfTI 사례 탐색·명시적 환자 규칙으로 train/val 생성
-│   ├── data.py                     # RAS·spacing·정규화·패치·출력 격자 복원
-│   ├── models.py                   # 3D U-Net / Swin UNETR 생성
-│   ├── train.py                    # 학습·검증·체크포인트·기록 저장
-│   ├── adapters.py                 # 모델 레지스트리·체크포인트 검증·추론
-│   ├── export_nnunet.py            # nnU-Net 데이터셋과 고정 split 변환
-│   ├── smoke.py                    # 작은 합성 데이터로 학습/추론 연결 확인
-│   └── tests/test_data_contract.py # 축·affine·라벨·분할·모델 계약 검증
-├── configs/manifest.example.json
-├── docs/
-│   ├── architecture.md             # 데이터 흐름·API·계산 정의·확장 경계
-│   ├── data-access.md              # 다운로드·원본 입력·점검과 정리
-│   ├── model-study.md              # 모델 원리·데이터 준비·학습·nnU-Net 연결
-│   └── verification.md             # 자동 테스트·실제 데이터 검증 기록
-├── .data/                          # 실행 시 생성; 사례 NIfTI와 case.json
-├── data/                           # 원본·manifest·점검 결과; Git에서 제외
-└── runs/                           # 학습 출력; Git에서 제외
+│   ├── tests/
+│   │   └── test_data_contract.py  # 데이터·모델 계약 테스트
+│   ├── __init__.py
+│   ├── adapters.py  # 모델 등록·체크포인트 검증·추론
+│   ├── data.py  # 전처리·패치·원본 격자 복원
+│   ├── export_nnunet.py  # nnU-Net 데이터셋 변환
+│   ├── manifest.py  # 파일 탐색·명시적 환자 ID 분할
+│   ├── models.py  # 3D U-Net·Swin UNETR 생성
+│   ├── requirements.txt  # ML 선택 의존성 안내
+│   ├── schema.py  # 채널·라벨·환자 분할 계약
+│   ├── smoke.py  # 합성 데이터 학습·추론 연결 검증
+│   └── train.py  # 학습·검증·체크포인트 저장
+├── scripts/
+│   ├── audit_mu_glioma_post.py  # 원본 전체 무결성·격자·라벨·중복 검사
+│   ├── prepare_mu_glioma_post.py  # 의심 사례 보류·학습 목록 생성
+│   ├── setup.ps1  # 의존성 설치·웹 빌드
+│   ├── start-dev.ps1  # API·Vite 개발 서버
+│   └── start.ps1  # 로컬 API·빌드된 웹 실행
+├── .env.example  # 로컬 설정 예제
+├── .gitignore  # 데이터·환경·생성물 제외 규칙
+├── pyproject.toml  # Python 패키지·의존성·테스트 설정
+└── README.md  # 프로젝트 시작 안내
 ```
+
+### 로컬 데이터와 실행 결과
+
+다음 경로는 현재 로컬 작업 폴더에 있고 `.gitignore`로 제외됩니다. `data/quality-check/`와 manifest는 현재 목록을 표시하고, MRI는 **실제로 존재하는 환자 1명의 검사 1개만 예시**로 표시했습니다. 다른 환자·시점과 `.data/`·`runs/`의 내부 생성 파일은 생략했습니다.
+
+```text
+BrainMRISegmentation_3D/
+├── .data/  # 앱이 사용하는 사례 저장소
+│   └── demo-brain-001/  # 기본 합성 사례; 내부 파일 생략
+├── data/  # 사용자가 받은 원본·학습 목록·점검 결과
+│   ├── MU-Glioma-Post/  # 환자 ID 203개; 아래는 실제 한 사례만 표시
+│   │   └── PatientID_0003/
+│   │       └── Timepoint_1/  # 다른 환자·시점은 생략
+│   │           ├── PatientID_0003_Timepoint_1_brain_t1c.nii.gz
+│   │           ├── PatientID_0003_Timepoint_1_brain_t1n.nii.gz
+│   │           ├── PatientID_0003_Timepoint_1_brain_t2f.nii.gz
+│   │           ├── PatientID_0003_Timepoint_1_brain_t2w.nii.gz
+│   │           └── PatientID_0003_Timepoint_1_tumorMask.nii.gz
+│   ├── quality-check/
+│   │   ├── audit.ipynb  # 실행 결과가 저장된 점검 노트북
+│   │   ├── audit.json  # 전체 원본 검사 결과
+│   │   ├── build_notebook.py  # 로컬 노트북 재생성 도구
+│   │   ├── cases.csv  # 검사별 목록
+│   │   ├── check_web_import.py  # 실제 파일의 API 입출력 검증
+│   │   ├── curation.json  # 보류 기준·연결 그룹·최종 분할
+│   │   ├── duplicate-case-pairs.json  # 중복 사례와 마스크 차이 확인
+│   │   ├── excluded-cases.csv  # 보류한 라벨 보유 사례
+│   │   ├── inventory.csv  # 파일 목록·SHA-256
+│   │   ├── preview.png  # 실제 사례의 네 시퀀스 미리보기
+│   │   ├── report.html  # 로컬 점검 보고서
+│   │   └── web-import-check.json  # 실제 사례 입출력 검증 결과
+│   ├── mu-glioma-post-all-labeled.json  # 보류 사례를 포함한 전체 라벨 목록
+│   ├── mu-glioma-post-manifest.json  # 정리된 기본 학습 입력
+│   ├── mu-glioma-post-unlabeled.json  # 마스크 없는 사례 목록
+│   └── README.md  # 이 로컬 자료의 사용 안내
+└── runs/  # 테스트·검증 출력; 학습 실행 시 체크포인트도 저장
+```
+
+`data/`는 원본 데이터와 학습 준비 결과를 보관하고, `.data/`는 웹에서 가져온 사례와 기본 합성 사례를 보관합니다. 웹 가져오기를 해야 원본이 앱 사례로 등록됩니다. `runs/`에는 현재 테스트·검증 출력이 있으며, 실제 데이터의 학습 가중치는 아직 생성하지 않았습니다.
+
+설치·빌드·테스트 과정에서 생기는 다음 경로도 현재 로컬에 있습니다.
+
+| 경로 | 용도 |
+| --- | --- |
+| `.venv/` | 프로젝트 Python 가상환경 |
+| `frontend/node_modules/` | 설치한 프런트엔드 패키지 |
+| `frontend/dist/` | 빌드된 웹 파일 |
+| `frontend/tsconfig.tsbuildinfo` | TypeScript 증분 빌드 정보 |
+| `.pytest_cache/`, 각 Python 폴더의 `__pycache__/` | 테스트·Python 실행 캐시 |
+| `brain_mri_segmentation_3d.egg-info/` | 로컬 Python 패키지 설치 정보 |
+| `.git/` | Git이 관리하는 로컬 저장소 메타데이터 |
+
+새로 clone한 폴더에는 GitHub 소스 구조가 먼저 생기며, 데이터 다운로드와 설치·실행 후 로컬 경로들이 추가됩니다.
 
 ## 개발과 검증
 
