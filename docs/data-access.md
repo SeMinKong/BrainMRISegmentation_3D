@@ -22,7 +22,7 @@
 
 ## 학습 manifest
 
-기본 절차는 [수동 manifest 예제](../configs/manifest.example.json)에 실제 파일 경로·환자 ID·분할을 입력해 `data/mu-glioma-post-manifest.json`으로 저장하는 것입니다. 예제의 파일명은 프로젝트 형식을 설명하기 위한 것으로 배포본의 실제 파일명을 뜻하지 않습니다.
+확인한 MU-Glioma-Post 배포본에는 아래의 **현재 배포본을 원본 그대로 점검하고 정리하기** 절차를 사용합니다. 다른 데이터 구조를 연결할 때는 [수동 manifest 예제](../configs/manifest.example.json)에 실제 파일 경로·환자 ID·분할을 입력할 수 있습니다. 예제의 파일명은 프로젝트 형식을 설명하기 위한 것으로 배포본의 실제 파일명을 뜻하지 않습니다.
 
 자동 탐색 도구는 `_seg.nii`/`-seg.nii` 및 압축형 `.nii.gz`, `_tumorMask.nii.gz` 마스크와 같은 접두사를 가진 MRI를 찾습니다. `_brain_`이 들어간 MRI 이름도 지원합니다. 환자 ID를 추측하지 않으므로 `--patient-regex`가 필요합니다. 예를 들어 확인한 사례명이 `patient-001_timepoint-01` 형식일 때만 다음 명령을 사용합니다. 데이터 위치와 정규식은 실제 구조에 맞게 지정해야 합니다.
 

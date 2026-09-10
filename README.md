@@ -6,6 +6,8 @@
 
 초기 MVP에는 실행 가능한 웹·API·NIfTI 처리·모델 학습 코드가 들어 있습니다. **MU-Glioma-Post 데이터와 학습된 가중치는 포함하지 않습니다.** 처음 실행하면 수학적으로 생성한 합성 MRI와 마스크가 나타나므로, 데이터 다운로드나 GPU 없이 UI를 먼저 사용할 수 있습니다. 합성 데모의 예측과 점수는 실제 모델 성능이 아닙니다.
 
+**현재 상태 — 2026-09-10:** 실제 다운로드 파일 2,978개의 무결성·입력 형식을 점검했고, 원본 파일명을 그대로 읽는 가져오기와 중복 검사·학습 목록 생성 도구를 추가했습니다. 점검한 데이터에서 571개 검사를 학습 후보로 정리했으며, 실제 데이터로 모델 학습은 아직 실행하지 않았습니다. 자세한 결과는 [검증 기록](docs/verification.md)에 있습니다.
+
 ## 빠르게 실행하기
 
 Windows PowerShell에서 이 프로젝트 폴더로 이동한 다음 실행합니다. Python **3.11 이상**과 Node.js **22.12 이상**을 준비하세요. 최초 설치에는 패키지 다운로드를 위한 인터넷 연결이 필요합니다.
@@ -58,17 +60,20 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 기본 범위는 **치료 후 교종 MRI와 분할 마스크**입니다. 여기서 다루는 데이터는 **3D NIfTI MRI 볼륨**이며, 스캐너의 k-space raw 신호 처리 도구는 아닙니다.
 
-웹은 파일명 마지막 토큰으로 시퀀스를 구분하며 `_`와 `-`를 모두 인식합니다. 다음은 프로젝트 입력 형식 예제이며 다운로드 원본의 파일명을 보장하지 않습니다. 실제 배포본의 환자·검사 폴더와 파일명을 확인한 뒤 연결합니다.
+원본은 `data/MU-Glioma-Post/` 아래에 환자·검사 폴더 구조를 유지해 보관합니다. 이번에 확인한 다운로드 파일은 다음 형식이며, 이름을 바꾸거나 별도 입력용 복사본을 만들 필요가 없습니다.
 
 ```text
-patient-001_timepoint-01_t1n.nii.gz   # T1
-patient-001_timepoint-01_t1c.nii.gz   # 조영증강 T1
-patient-001_timepoint-01_t2w.nii.gz   # T2
-patient-001_timepoint-01_t2f.nii.gz   # FLAIR
-patient-001_timepoint-01_seg.nii.gz   # 정답 마스크, 웹 열람에서는 선택 사항
+data/MU-Glioma-Post/PatientID_0003/Timepoint_1/
+├── PatientID_0003_Timepoint_1_brain_t1n.nii.gz   # T1
+├── PatientID_0003_Timepoint_1_brain_t1c.nii.gz   # 조영증강 T1
+├── PatientID_0003_Timepoint_1_brain_t2w.nii.gz   # T2
+├── PatientID_0003_Timepoint_1_brain_t2f.nii.gz   # FLAIR
+└── PatientID_0003_Timepoint_1_tumorMask.nii.gz   # 정답 마스크
 ```
 
-웹에서는 MRI 한 개만 가져와도 단면을 볼 수 있습니다. 실제 모델 추론에는 **네 시퀀스 모두**가 필요합니다. `t1`, `t1ce`, `t2`, `flair` 별칭도 지원합니다. 정답 마스크가 없어도 등록한 모델로 추론할 수 있지만 정답 대비 평가 점수는 계산할 수 없습니다.
+**`data/`에 파일을 넣는 것만으로 웹 사례 목록에 자동 등록되지는 않습니다.** 웹의 **NIfTI 가져오기**에서 한 `Timepoint_*` 폴더의 MRI 4개와 정답 마스크가 있으면 함께 선택하고, `MU-Glioma-Post` 프리셋으로 가져옵니다. 여러 환자나 검사 시점의 파일을 한 사례로 섞지 않습니다.
+
+웹은 파일명 마지막 토큰으로 시퀀스를 구분하며 `_`와 `-`를 모두 인식합니다. `tumorMask`, `seg`, `mask`, `segmentation`은 마스크로 인식합니다. MRI 한 개만 가져와도 단면을 볼 수 있지만 실제 모델 추론에는 **네 시퀀스 모두**가 필요합니다. `t1`, `t1ce`, `t2`, `flair` 별칭도 지원합니다. 정답 마스크가 없어도 등록한 모델로 추론할 수 있지만 정답 대비 평가 점수는 계산할 수 없습니다.
 
 | 라벨 프리셋 | 의미 | 용도 |
 | --- | --- | --- |
@@ -86,6 +91,41 @@ patient-001_timepoint-01_seg.nii.gz   # 정답 마스크, 웹 열람에서는 �
 - 웹은 RAS 방향으로 축을 정리하고 실제 간격을 유지합니다. oblique/shear 격자는 업로드 전에 축 정렬된 격자로 재표본화해야 합니다.
 - DICOM·ZIP·4D 시계열, 영상 정합, 두개골 제거는 현재 가져오기 범위에 없습니다.
 
+## 데이터 점검과 학습 목록 준비
+
+프로젝트 루트에서 다음 두 명령을 실행합니다. 첫 단계는 원본 전체를 읽어 검사하고, 두 번째 단계는 검사 결과에 따라 학습 목록을 만듭니다. **원본 MRI는 이동·이름 변경·수정·삭제하지 않습니다.**
+
+```powershell
+.\.venv\Scripts\python.exe -E scripts/audit_mu_glioma_post.py --data-root data/MU-Glioma-Post --output data/quality-check --workers 4
+.\.venv\Scripts\python.exe -E scripts/prepare_mu_glioma_post.py --audit data/quality-check/audit.json --output-dir data --seed 42 --val-fraction 0.2
+```
+
+2026-09-10에 점검한 로컬 자료의 결과는 다음과 같습니다. 배포본이나 파일을 바꾸면 다시 검사해야 하며, 아래 수량은 그때 확인한 자료 기준입니다.
+
+| 항목 | 확인 결과 및 처리 |
+| --- | --- |
+| 전체 규모 | 환자 ID 203개 · 검사 시점 596개 · NIfTI 2,978개 |
+| 파일 무결성·입력 형식 | 전체 gzip CRC·복셀 값·허용 라벨·검사 내 shape/affine 검사 통과 |
+| 공간 정보 | 전체 240×240×155, 1 mm, LPS; 웹에서 RAS로 정규화 |
+| 마스크 없는 검사 | 2개를 지도 학습에서 제외하고 별도 목록으로 보관 |
+| 다른 환자 ID 사이의 동일 MRI | MRI 4종이 같은 11쌍, 양쪽 22개 검사를 학습에서 보류 |
+| 시퀀스 의심 | 한 검사에서 T1과 FLAIR가 동일하여 1개 보류 |
+| 최종 학습 후보 | 571개 검사 · 환자 ID 200개; 학습 435개 / 검증 136개 |
+
+동일 MRI 11쌍 중 8쌍은 정답 마스크의 복셀 값이 다릅니다. 어느 쪽이 맞는지 임의로 판단하지 않고 두 사례를 모두 검토 대상으로 보관했습니다. 같은 환자의 모든 시점과 동일 파일로 연결된 환자 ID의 남은 검사는 같은 `split_group`에 둡니다. 원래 환자 ID를 합치지는 않습니다. seed 42, 검증 비율 0.2는 **분할 그룹 기준**이며, 최종 환자 ID 분할은 학습 160개 / 검증 40개입니다.
+
+| 생성 파일 | 용도 |
+| --- | --- |
+| `data/mu-glioma-post-manifest.json` | **기본 학습 입력**; 보류 사례를 제외한 상대 경로 manifest |
+| `data/mu-glioma-post-all-labeled.json` | 보류 사례를 포함한 라벨 보유 594개 전체 목록; 검토용 |
+| `data/mu-glioma-post-unlabeled.json` | 마스크 없는 2개 검사 목록; 지도 학습 입력이 아님 |
+| `data/quality-check/audit.json`, `inventory.csv`, `cases.csv` | 전체 검사 결과, 파일 SHA-256, 검사별 목록 |
+| `data/quality-check/curation.json`, `excluded-cases.csv` | 보류 사유, 연결된 환자 ID, 최종 분할 |
+
+위 결과와 데이터는 `data/` 아래에서 로컬로 생성되며 Git에는 포함되지 않습니다. 파일을 추가·교체하면 두 명령을 다시 실행하세요. 이번 작업에서 작성한 로컬 HTML 보고서와 노트북은 별도 스냅샷이며, 위 두 명령으로 자동 생성되거나 갱신되지는 않습니다.
+
+압축 파일 SHA-256 검사는 재압축되거나 일부 수정된 유사 영상을 모두 탐지하지 못합니다. 좌표·라벨 형식이 맞는다고 실제 해부학적 정렬이나 주석 정확도가 검증된 것은 아닙니다. 검사 방법과 범위는 [데이터 안내](docs/data-access.md)와 [검증 기록](docs/verification.md)을 참고하세요.
+
 ## 모델 공부와 실제 학습
 
 실제 모델 사용 시 선택 의존성을 추가합니다. CUDA를 사용할 경우 먼저 환경에 맞는 PyTorch 설치를 준비하세요. 상세 명령과 nnU-Net 학습 과정은 [docs/model-study.md](docs/model-study.md)를 참고하세요.
@@ -99,13 +139,13 @@ CPU 전용 PyTorch를 설치하려면 `setup.ps1 -WithML -CpuOnly`를 사용합�
 
 `ml.smoke`는 작은 합성 볼륨 두 개로 **실제 학습 1 step → validation → 체크포인트 저장 → 등록 모델 추론 → 출력 shape·affine·정수 라벨 검증**을 수행합니다. 생성된 `runs/smoke/best.pt`는 연결을 확인하기 위한 가중치이며 실데이터 성능 모델이 아닙니다.
 
-MU-Glioma-Post 다운로드 후 [manifest 예제](configs/manifest.example.json)의 경로와 환자 ID를 실제 파일에 맞춰 `data/mu-glioma-post-manifest.json`에 작성합니다. 같은 환자의 여러 검사를 같은 분할로 묶은 뒤 학습합니다.
+MU-Glioma-Post는 위의 **데이터 점검과 학습 목록 준비** 두 단계를 먼저 실행하고, 생성된 `data/mu-glioma-post-manifest.json`으로 학습합니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --output runs/unet3d --epochs 100 --patch-size 64 64 64
 ```
 
-`ml.manifest` 자동 탐색을 사용하려면 실제 파일명과 일치하는 `--patient-regex`를 명시해야 합니다. 원본 배포 구조는 다운로드 후 확인하며, 자동 탐색 조건과 다르면 수동 manifest를 사용합니다. 환자 ID가 잘못 입력되면 자동 누출 검사도 이를 알아낼 수 없으므로 학습 전에 분할을 확인하세요.
+다른 폴더 구조를 연결할 때는 [수동 manifest 예제](configs/manifest.example.json)를 참고할 수 있습니다. `ml.manifest` 자동 탐색은 명시적인 `--patient-regex`가 필요하고 파일 구성·환자 ID 분할을 검사하지만, 파일 내용 중복에 따른 보류 정책은 적용하지 않습니다. 점검한 MU-Glioma-Post의 학습 목록은 `prepare_mu_glioma_post.py`로 재생성하세요. 환자 ID 자체가 잘못 기록된 경우까지 자동으로 보정하지는 않습니다.
 
 | 모델 | 구현 상태 |
 | --- | --- |
@@ -143,7 +183,9 @@ BrainMRISegmentation_3D/
 ├── scripts/
 │   ├── setup.ps1                   # 가상환경·의존성 설치·웹 빌드
 │   ├── start.ps1                   # 로컬 API + 빌드된 웹 실행
-│   └── start-dev.ps1               # API + Vite 개발 서버
+│   ├── start-dev.ps1               # API + Vite 개발 서버
+│   ├── audit_mu_glioma_post.py     # 원본 전체 무결성·격자·라벨·중복 검사
+│   └── prepare_mu_glioma_post.py   # 의심 사례 보류·내용 중복을 고려한 분할
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                 # FastAPI 라우트·업로드·추론 작업 큐
@@ -174,9 +216,11 @@ BrainMRISegmentation_3D/
 ├── configs/manifest.example.json
 ├── docs/
 │   ├── architecture.md             # 데이터 흐름·API·계산 정의·확장 경계
-│   └── model-study.md              # 모델 원리·데이터 준비·학습·nnU-Net 연결
+│   ├── data-access.md              # 다운로드·원본 입력·점검과 정리
+│   ├── model-study.md              # 모델 원리·데이터 준비·학습·nnU-Net 연결
+│   └── verification.md             # 자동 테스트·실제 데이터 검증 기록
 ├── .data/                          # 실행 시 생성; 사례 NIfTI와 case.json
-├── data/                           # 사용자 데이터/manifest; Git에서 제외
+├── data/                           # 원본·manifest·점검 결과; Git에서 제외
 └── runs/                           # 학습 출력; Git에서 제외
 ```
 
@@ -198,6 +242,8 @@ npm --prefix frontend run build
 ```
 
 단위 테스트는 합성 사례를 사용해 입력 거절, 물리 좌표, 마스크 저장, 실제 계산된 지표 및 추론 작업 흐름을 검사합니다. 선택 ML 설치 후 `ml.smoke`로 실제 optimizer와 체크포인트 추론까지 확인할 수 있습니다. MU-Glioma-Post에서 학습한 가중치의 정확도 검증은 별도의 데이터와 실험이 필요합니다.
+
+2026-09-10 기준 백엔드·데이터 계약 테스트 **43개**가 통과했습니다. 실제 다운로드 사례의 MRI 4개와 `tumorMask`를 가져와 단면·3D mesh 응답을 확인했고, 다운로드한 마스크가 RAS로 정규화한 원본의 복셀 값·affine과 일치하는지 검증했습니다. 상세 실행 범위는 [검증 기록](docs/verification.md)에 있습니다.
 
 ## 현재 범위와 다음 단계
 
