@@ -1,0 +1,8 @@
+# Optional learning/inference dependencies. Install a suitable PyTorch build first.
+torch>=2.6,<3
+monai>=1.5,<1.7
+einops>=0.8,<1
+nibabel>=5.3,<6
+numpy>=1.26,<3
+scipy>=1.13,<2
+# nnU-Net is a separate opt-in: pip install nnunetv2

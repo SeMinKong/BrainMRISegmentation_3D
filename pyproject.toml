@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain-mri-segmentation-3d"
+version = "0.1.0"
+description = "Local 3D MRI segmentation, visualization, and model study workspace"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.29,<1", "python-multipart>=0.0.20,<1",
+  "numpy>=1.26,<3", "scipy>=1.15,<2", "nibabel>=5.3,<6",
+  "scikit-image>=0.25,<1", "pillow>=11,<13", "python-dotenv>=1,<2"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1"]
+ml = ["torch>=2.8,<3", "monai>=1.5,<1.7", "einops>=0.8,<1"]
+nnunet = ["nnunetv2>=2.6,<3"]
+
+[tool.setuptools.packages.find]
+include = ["backend*", "ml*"]
+exclude = ["backend.tests*", "ml.tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests", "ml/tests"]
+addopts = "-ra --basetemp=.pytest_cache/tmp"

@@ -1,0 +1,43 @@
+# Local Python environments and packaging
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+
+# Frontend dependencies and generated bundles
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# MRI data, training runs and checkpoints
+.data/
+data/
+runs/
+nnUNet_raw/
+nnUNet_preprocessed/
+nnUNet_results/
+*.nii
+*.nii.gz
+*.dcm
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Machine-local configuration and output
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
