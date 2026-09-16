@@ -15,6 +15,11 @@ if ($WithML) {
   if ($CpuOnly) {
     & $pythonPath -E -m pip install torch --index-url https://download.pytorch.org/whl/cpu
     if ($LASTEXITCODE -ne 0) { throw 'CPU PyTorch installation failed.' }
+  } else {
+    # PyPI Windows wheels are CPU-only; the CUDA build must come from the PyTorch index.
+    # cu130 covers RTX 50-series (Blackwell) and requires an NVIDIA driver with CUDA 13 support.
+    & $pythonPath -E -m pip install torch --index-url https://download.pytorch.org/whl/cu130
+    if ($LASTEXITCODE -ne 0) { throw 'CUDA PyTorch installation failed. Use -CpuOnly for a CPU-only environment.' }
   }
   & $pythonPath -E -m pip install -e '.[ml]'
   if ($LASTEXITCODE -ne 0) { throw 'ML dependency installation failed.' }

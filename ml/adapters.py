@@ -27,6 +27,35 @@ def _has_package(name: str) -> bool:
         return False
 
 
+_summary_cache: dict[tuple[str, int], dict] = {}
+
+
+def checkpoint_summary(path: Path) -> dict:
+    """Training facts stored in a project checkpoint, for showing users what the model was measured on.
+
+    Read once per file version (path + mtime); only tensors/metadata are deserialized (weights_only).
+    """
+    try:
+        key = (str(path.resolve()), path.stat().st_mtime_ns)
+    except OSError:
+        return {}
+    cached = _summary_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        import torch
+        metadata = torch.load(path, map_location="cpu", weights_only=True).get("metadata", {})
+    except Exception:  # noqa: BLE001 - an unreadable checkpoint is reported as "no summary", inference validates later
+        metadata = {}
+    summary = {key_: metadata.get(key_) for key_ in ("validation_mean_dice", "validated_epoch", "epoch", "global_step",
+                                                      "train_cases", "val_cases", "patch_size", "spacing_mm", "model_settings")
+               if metadata.get(key_) is not None}
+    if len(_summary_cache) > 8:
+        _summary_cache.clear()
+    _summary_cache[key] = summary
+    return summary
+
+
 def describe_models() -> list[dict]:
     models = []
     for model_id, (name, variable, description) in MODEL_INFO.items():
@@ -48,8 +77,10 @@ def describe_models() -> list[dict]:
             model_id == "nnunet" and path.is_dir() and (path / "plans.json").is_file()
             and (path / "dataset.json").is_file() and bool(list(path.glob("fold_*/checkpoint_final.pth")))
         )
-        models.append({"id": model_id, "name": name, "available": bool(available),
-                       "reason": reason, "description": description})
+        entry = {"id": model_id, "name": name, "available": bool(available), "reason": reason, "description": description}
+        if available and model_id != "nnunet":
+            entry["training"] = checkpoint_summary(path)
+        models.append(entry)
     return models
 
 
