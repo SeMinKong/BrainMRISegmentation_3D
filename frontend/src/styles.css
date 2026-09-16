@@ -517,7 +517,7 @@ input[type="range"]::-moz-range-thumb {
 .label-fill.v-low { background: var(--danger); }
 .label-fill.v-mid { background: #c39a2a; }
 .label-value { font-weight: 700; min-width: 3.5ch; text-align: right; }
-.worst-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; counter-reset: worst; }
+.worst-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; counter-reset: worst; list-style: none; padding: 0; margin: 0; }
 .worst-list li { counter-increment: worst; }
 .worst-row {
   width: 100%; display: grid; grid-template-columns: auto 1fr auto; grid-template-areas: "n name dice" "n detail detail"; column-gap: 12px; row-gap: 2px;
