@@ -82,6 +82,38 @@ def validate_matching_grid(reference: nib.Nifti1Image, other: nib.Nifti1Image) -
         raise ValueError("All modalities and segmentation must share the same affine/spacing. Register and resample them first.")
 
 
+def canonical_geometry(image: nib.Nifti1Image) -> tuple[tuple[int, ...], np.ndarray]:
+    """Shape and affine the volume has after `as_closest_canonical`, computed from the header only.
+
+    Linked source files (e.g. LPS MU-Glioma-Post originals) are never rewritten; this lets the
+    store describe and validate their RAS grid without decompressing voxel data.
+    """
+    if len(image.shape) != 3 or any(n < 2 for n in image.shape):
+        raise ValueError("A 3D NIfTI volume with at least 2 voxels per axis is required.")
+    if not np.isfinite(image.affine).all() or abs(np.linalg.det(image.affine[:3, :3])) < 1e-8:
+        raise ValueError("NIfTI affine must be finite and invertible.")
+    ornt = nib.orientations.io_orientation(image.affine)
+    transform = nib.orientations.ornt_transform(ornt, np.array([[0, 1], [1, 1], [2, 1]], dtype=float))
+    shape = tuple(int(image.shape[int(axis)]) for axis in transform[:, 0])
+    affine = image.affine @ nib.orientations.inv_ornt_aff(transform, image.shape)
+    spacing = nib.affines.voxel_sizes(affine)
+    if np.any(spacing <= 0) or np.any(spacing > 50):
+        raise ValueError("Voxel spacing must be positive and at most 50 mm.")
+    if not np.allclose(affine[:3, :3] / spacing, np.eye(3), atol=1e-3):
+        raise ValueError("Oblique/sheared grids are not supported in this MVP. Resample to an axis-aligned RAS grid first.")
+    return shape, affine
+
+
+def read_canonical(path: Path) -> nib.Nifti1Image:
+    """Load a stored or linked NIfTI as closest-canonical RAS (no-op for files saved by the store)."""
+    return nib.as_closest_canonical(nib.load(str(path), mmap=False))
+
+
+def is_safe_case_id(case_id: str) -> bool:
+    return bool(case_id) and len(case_id) <= 80 and case_id.replace("_", "").replace("-", "").replace(".", "").isalnum() \
+        and not case_id.startswith(".") and case_id not in {".", ".."}
+
+
 def make_phantom() -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     """Deterministic smooth brain-like mathematical phantom in a 1.7 mm grid."""
     shape = (96, 112, 96)
@@ -178,37 +210,84 @@ def _mesh(binary: np.ndarray, affine: np.ndarray, step: int = 1) -> dict:
     if not binary.any():
         return {"vertices": [], "faces": []}
     crossings = sum(int(np.count_nonzero(np.diff(binary.astype(np.int8), axis=axis))) for axis in range(3))
-    if crossings > 250_000:
+    if crossings > 600_000:
         return {"vertices": [], "faces": [], "note": "Surface is too complex for the bounded MVP viewer; use slice view."}
     padded = np.pad(binary.astype(np.uint8), 1)
     vertices, faces, _, _ = marching_cubes(padded, level=.5, step_size=step, allow_degenerate=False)
     vertices -= 1
     vertices = nib.affines.apply_affine(affine, vertices)
-    return {"vertices": np.round(vertices, 3).ravel().tolist(), "faces": faces.ravel().tolist()}
+    return {"vertices": np.round(vertices, 1).ravel().tolist(), "faces": faces.ravel().tolist()}
 
 
-def make_mesh(volume: np.ndarray, mask: np.ndarray | None, affine: np.ndarray) -> dict:
-    # Downsampling caps mesh size while returned vertices retain mm coordinates.
-    stride = max(1, int(np.ceil(max(volume.shape) / 128)))
-    small = volume[::stride, ::stride, ::stride]
-    small_affine = affine.copy()
-    small_affine[:3, :3] *= stride
-    nonzero = small[small > 0]
-    threshold = np.percentile(nonzero, 8) if nonzero.size else 0
-    brain = ndimage.binary_fill_holes(small > threshold)
-    components, count = ndimage.label(brain)
+def _smooth_mesh(field: np.ndarray, affine: np.ndarray, level: float = 0.5) -> dict:
+    """Marching cubes on a lightly blurred binary field: removes voxel staircase without filling sulci."""
+    if not (field > level).any():
+        return {"vertices": [], "faces": []}
+    padded = np.pad(field.astype(np.float32), 1)
+    vertices, faces, _, _ = marching_cubes(padded, level=level, step_size=1, allow_degenerate=False)
+    vertices -= 1
+    vertices = nib.affines.apply_affine(affine, vertices)
+    # 0.1 mm precision is far below voxel size and keeps the JSON payload small.
+    return {"vertices": np.round(vertices, 1).ravel().tolist(), "faces": faces.ravel().tolist()}
+
+
+def brain_surface_mask(volume: np.ndarray) -> np.ndarray:
+    """Cortex-like envelope from intensity: dark voxels (CSF in sulci) are excluded so gyri show as folds.
+
+    Skull-stripped inputs (MU-Glioma-Post) make the nonzero support the brain; for other inputs this is
+    still only a contextual surface, not an anatomical segmentation.
+    """
+    nonzero = volume[volume > 0]
+    if not nonzero.size:
+        return np.zeros(volume.shape, dtype=bool)
+    threshold = np.percentile(nonzero, 22)
+    tissue = volume > threshold
+    tissue = ndimage.binary_opening(tissue, iterations=1)
+    components, count = ndimage.label(tissue)
     if count:
         counts = np.bincount(components.ravel())
         counts[0] = 0
-        brain = components == counts.argmax()
-    brain = ndimage.binary_closing(brain, iterations=2)
+        tissue = components == counts.argmax()
+    # Close only small gaps (one voxel) so the folds carved by CSF survive.
+    return ndimage.binary_fill_holes(ndimage.binary_closing(tissue, iterations=1))
+
+
+def make_mesh(volume: np.ndarray, mask: np.ndarray | None, affine: np.ndarray) -> dict:
+    # Full resolution up to 256 voxels per axis (MU-Glioma-Post 240x240x155 -> 1 mm): cortical folds and the
+    # tumour boundary come out as measured. Larger grids are strided down to bound mesh size. Results are
+    # cached per case in the API layer (~1.3 s to build, ~2.5 MB gzipped for a 1 mm brain).
+    stride = max(1, int(np.ceil(max(volume.shape) / 256)))
+    small = volume[::stride, ::stride, ::stride]
+    small_affine = affine.copy()
+    small_affine[:3, :3] *= stride
+    brain = brain_surface_mask(small)
+    crossings = sum(int(np.count_nonzero(np.diff(brain.astype(np.int8), axis=axis))) for axis in range(3))
+    if crossings > 600_000:
+        brain_mesh = {"vertices": [], "faces": [], "note": "Brain surface too complex for the bounded viewer."}
+    else:
+        brain_mesh = _smooth_mesh(ndimage.gaussian_filter(brain.astype(np.float32), 1.0 if stride == 1 else 0.7), small_affine)
     regions = []
     if mask is not None:
         for label in LABELS:
             regions.append({"label": label["id"], **_mesh(mask[::stride, ::stride, ::stride] == label["id"], small_affine)})
     center = nib.affines.apply_affine(affine, (np.array(volume.shape) - 1) / 2)
-    return {"brain": _mesh(brain, small_affine, 2), "regions": regions, "center": center.tolist(),
+    return {"brain": brain_mesh, "regions": regions, "center": center.tolist(),
             "units": "mm", "brain_surface": "intensity-derived contextual surface, not anatomical segmentation"}
+
+
+def windowed_uint8(volume: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Map intensities to 0-255 with a robust window (0.5-99.5th percentile of positive voxels).
+
+    The browser applies the interactive contrast on top of this, so slices render locally without a round trip.
+    """
+    positive = volume[volume > 0]
+    if positive.size:
+        low, high = np.percentile(positive[::max(1, positive.size // 400_000)], (0.5, 99.5))
+    else:
+        low, high = float(volume.min()), float(volume.max())
+    low, high = float(low), float(max(high, low + 1e-6))
+    scaled = np.clip((volume - low) / (high - low), 0, 1) * 255
+    return np.ascontiguousarray(scaled.astype(np.uint8)), low, high
 
 
 def _surface_points(binary: np.ndarray, affine: np.ndarray) -> np.ndarray:

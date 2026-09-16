@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+import gzip
+import json
 import os
 import mimetypes
 from pathlib import Path
@@ -12,14 +14,15 @@ import time
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import nibabel as nib
 import numpy as np
 from pydantic import BaseModel, Field
 
-from .store import CaseStore, utc_now
-from .volumes import LABEL_PRESETS, load_nifti, make_mesh, make_phantom, modality_from_name, slice_png, stats, validate_matching_grid
+from .store import DEMO_POLICIES, CaseStore, utc_now
+from .volumes import LABEL_PRESETS, load_nifti, make_mesh, make_phantom, modality_from_name, read_canonical, slice_png, stats, windowed_uint8
 
 # Windows registry MIME associations can label JavaScript as text/plain.
 # ES module scripts require an explicit JavaScript type with nosniff enabled.
@@ -27,6 +30,7 @@ mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SOURCE_MANIFEST = PROJECT_ROOT / "data" / "mu-glioma-post-manifest.json"
 MAX_FILE_BYTES = 256 * 1024 * 1024
 MAX_IMPORT_BYTES = 768 * 1024 * 1024
 MAX_IMPORT_VOXELS = 96_000_000
@@ -53,18 +57,47 @@ def model_catalog() -> list[dict]:
                 ("swinunetr", "Swin UNETR", "Transformer encoder for volumetric segmentation.")]]]
 
 
-def create_app(data_dir: Path | None = None) -> FastAPI:
+def resolve_source_manifest(value: str | None) -> Path | None:
+    """MRI_SOURCE_MANIFEST: path to a manifest, empty/'none' to disable, unset for the curated default if present."""
+    if value is None:
+        return DEFAULT_SOURCE_MANIFEST if DEFAULT_SOURCE_MANIFEST.is_file() else None
+    if not value.strip() or value.strip().lower() in ("none", "off", "0", "false"):
+        return None
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    if not path.is_file():
+        raise FileNotFoundError(f"MRI_SOURCE_MANIFEST does not exist: {path}")
+    return path
+
+
+def offered_models(state) -> list[dict]:
+    """The synthetic pipeline is only offered while a synthetic case is listed."""
+    has_demo = state.store.has_demo()
+    return [item for item in model_catalog() if has_demo or not item.get("demo_only")]
+
+
+def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | str = "env",
+               demo: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(instance: FastAPI):
-        instance.state.store = CaseStore(data_dir or Path(os.getenv("MRI_DATA_DIR", str(PROJECT_ROOT / ".data"))))
+        manifest = resolve_source_manifest(os.getenv("MRI_SOURCE_MANIFEST")) if source_manifest == "env" else source_manifest
+        policy = (demo or os.getenv("MRI_DEMO_CASE", "auto")).strip().lower()
+        if policy not in DEMO_POLICIES:
+            raise ValueError(f"MRI_DEMO_CASE must be one of {', '.join(DEMO_POLICIES)}")
+        instance.state.store = CaseStore(data_dir or Path(os.getenv("MRI_DATA_DIR", str(PROJECT_ROOT / ".data"))),
+                                         source_manifest=manifest, demo=policy)
         instance.state.jobs = {}
         instance.state.jobs_lock = threading.RLock()
         instance.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mri-inference")
         instance.state.processing = threading.BoundedSemaphore(2)
+        instance.state.mesh_cache = {}
         yield
         instance.state.executor.shutdown(wait=True)
 
     api = FastAPI(title="NeuroScope · local 3D MRI study workspace", version="0.1.0", lifespan=lifespan)
+    # Raw volumes (9 MB uint8 for a 240x240x155 grid) and mesh JSON compress well; slices render in the browser.
+    api.add_middleware(GZipMiddleware, minimum_size=4096, compresslevel=4)
 
     @api.middleware("http")
     async def local_origin_guard(request: Request, call_next):
@@ -90,8 +123,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=422)
 
     @api.get("/api/health")
-    def health():
-        return {"status": "ok", "version": "0.1.0", "mode": "local-research", "demo": True}
+    def health(request: Request):
+        store = request.app.state.store
+        cases = store.list()
+        return {"status": "ok", "version": "0.1.0", "mode": "local-research", "demo": store.has_demo(),
+                "cases": {"total": len(cases), "linked": sum(case["source"] == "linked" for case in cases),
+                          "uploaded": sum(case["source"] == "uploaded" for case in cases)},
+                "source_manifest": store.link_report}
 
     @api.get("/api/label-presets")
     def label_presets():
@@ -171,10 +209,44 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def get_mesh(case_id: str, request: Request, segmentation: str = "reference"):
         state = request.app.state
         case = state.store.get(case_id)
+        has_mask = bool(case["segmentations"])
+        key = (case_id, segmentation if has_mask else None,
+               state.store.segmentation_path(case_id, segmentation).stat().st_mtime_ns if has_mask else 0)
         with state.processing:
-            volume, affine = state.store.read_modality(case_id)
-            mask = state.store.read_segmentation(case_id, segmentation) if case["segmentations"] else None
-            return make_mesh(volume, mask, affine)
+            cached = state.mesh_cache.get(key)
+            if cached is None:
+                volume, affine = state.store.read_modality(case_id)
+                mask = state.store.read_segmentation(case_id, segmentation) if has_mask else None
+                # Serialize and gzip once: a 1 mm brain is ~13 MB of JSON, and compressing it per request
+                # (or encoding it through the generic JSON encoder) would cost seconds every time.
+                payload = json.dumps(make_mesh(volume, mask, affine), separators=(",", ":")).encode("utf-8")
+                cached = gzip.compress(payload, compresslevel=5)
+                if len(state.mesh_cache) >= 12:
+                    state.mesh_cache.pop(next(iter(state.mesh_cache)))
+                state.mesh_cache[key] = cached
+        return Response(cached, media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding", "Cache-Control": "private, max-age=300"})
+
+    @api.get("/api/cases/{case_id}/volumes/{modality}")
+    def get_volume(case_id: str, modality: str, request: Request):
+        """Whole MRI as windowed uint8 (C order, RAS grid) so the browser can scrub slices without round trips."""
+        state = request.app.state
+        case = state.store.get(case_id)
+        with state.processing:
+            volume, _ = state.store.read_modality(case_id, modality)
+            data, low, high = windowed_uint8(volume)
+        return Response(data.tobytes(), media_type="application/octet-stream", headers={
+            "X-Shape": ",".join(map(str, case["shape"])), "X-Spacing": ",".join(f"{v:.6g}" for v in case["spacing"]),
+            "X-Dtype": "uint8", "X-Window": f"{low:.6g},{high:.6g}", "Cache-Control": "private, max-age=300"})
+
+    @api.get("/api/cases/{case_id}/segmentations/{segmentation_id}/volume")
+    def get_segmentation_volume(case_id: str, segmentation_id: str, request: Request):
+        state = request.app.state
+        case = state.store.get(case_id)
+        with state.processing:
+            mask = state.store.read_segmentation(case_id, segmentation_id)
+        return Response(np.ascontiguousarray(mask, dtype=np.uint8).tobytes(), media_type="application/octet-stream", headers={
+            "X-Shape": ",".join(map(str, case["shape"])), "X-Dtype": "uint8", "Cache-Control": "private, max-age=300"})
 
     @api.get("/api/cases/{case_id}/stats")
     def get_stats(case_id: str, request: Request, segmentation: str = "reference", reference: str = "reference"):
@@ -198,11 +270,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def download(case_id: str, segmentation_id: str, request: Request):
         store = request.app.state.store
         path = store.segmentation_path(case_id, segmentation_id)
-        return FileResponse(path, filename=f"{case_id}_{segmentation_id}.nii.gz", media_type="application/gzip")
+        filename = f"{case_id}_{segmentation_id}.nii.gz"
+        if store.is_linked_path(path):
+            # Linked originals are LPS on disk; export the same RAS grid the web displays and stores for predictions.
+            with request.app.state.processing:
+                image = read_canonical(path)
+                output = nib.Nifti1Image(np.asarray(image.dataobj).astype(np.uint8), image.affine)
+                output.header.set_xyzt_units("mm")
+                payload = gzip.compress(output.to_bytes())
+            return Response(payload, media_type="application/gzip",
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        return FileResponse(path, filename=filename, media_type="application/gzip")
 
     @api.get("/api/models")
-    def models():
-        return {"models": model_catalog()}
+    def models(request: Request):
+        return {"models": offered_models(request.app.state)}
 
     def perform_job(state, job_id: str, body: JobRequest):
         started = time.monotonic()
@@ -251,7 +333,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def start_job(body: JobRequest, request: Request):
         state = request.app.state
         case = state.store.get(body.case_id)
-        model = next((item for item in model_catalog() if item["id"] == body.model_id), None)
+        model = next((item for item in offered_models(state) if item["id"] == body.model_id), None)
         if model is None:
             raise HTTPException(404, "Unknown model.")
         if not model["available"]:
@@ -304,7 +386,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if candidate.is_relative_to(frontend.resolve()) and candidate.is_file():
             return FileResponse(candidate)
         if (frontend / "index.html").exists():
-            return FileResponse(frontend / "index.html")
+            # The shell must always revalidate so a new build's hashed assets are picked up on plain reload.
+            return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-cache"})
         return JSONResponse({"message": "API is running. Build the frontend with npm run build, or run the Vite dev server.", "api_docs": "/docs"})
 
     return api

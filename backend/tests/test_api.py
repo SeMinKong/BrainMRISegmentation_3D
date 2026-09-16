@@ -19,7 +19,8 @@ from backend.app.volumes import LABELS, _slice, load_nifti, mask_metrics, stats
 
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
-    with TestClient(create_app(tmp_path_factory.mktemp("case-data"))) as browser:
+    # source_manifest=None keeps the suite independent of a developer's local data/ folder.
+    with TestClient(create_app(tmp_path_factory.mktemp("case-data"), source_manifest=None)) as browser:
         yield browser
 
 
@@ -111,6 +112,34 @@ def test_mesh_is_three_dimensional_and_uses_shared_physical_frame(client):
         assert points.shape[0] > 10
         assert np.ptp(points, axis=0).min() > 0
         assert faces.max() < points.shape[0]
+
+
+def test_raw_volumes_match_case_grid_and_slice_orientation(client):
+    case = client.get("/api/cases/demo-brain-001").json()
+    shape = case["shape"]
+    result = client.get("/api/cases/demo-brain-001/volumes/t1c")
+    assert result.status_code == 200
+    assert result.headers["x-shape"] == ",".join(map(str, shape))
+    assert result.headers["x-dtype"] == "uint8"
+    low, high = map(float, result.headers["x-window"].split(","))
+    assert high > low
+    volume = np.frombuffer(result.content, dtype=np.uint8).reshape(shape)
+    assert volume.max() == 255 and volume.min() == 0
+    mask_result = client.get("/api/cases/demo-brain-001/segmentations/reference/volume")
+    assert mask_result.status_code == 200
+    mask = np.frombuffer(mask_result.content, dtype=np.uint8).reshape(shape)
+    assert set(np.unique(mask)).issubset({0, 1, 2, 3, 4}) and mask.any()
+    # The browser renders axial rows as flipped transposes; that must agree with the server PNG orientation.
+    index = shape[2] // 2
+    axial, _ = _slice(mask, "axial", index)
+    assert axial.shape == (shape[1], shape[0])
+    assert axial[0, 0] == mask[shape[0] - 1, shape[1] - 1, index]
+    assert client.get("/api/cases/demo-brain-001/volumes/nope").status_code == 404
+    assert client.get("/api/cases/demo-brain-001/segmentations/nope/volume").status_code == 404
+    # Mesh responses are cached per segmentation file; a second call returns the same payload.
+    first = client.get("/api/cases/demo-brain-001/mesh").json()
+    second = client.get("/api/cases/demo-brain-001/mesh").json()
+    assert first == second and first["brain"]["vertices"]
 
 
 def test_demo_scores_are_computed_without_self_comparison(client):

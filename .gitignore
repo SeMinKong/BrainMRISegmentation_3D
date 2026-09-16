@@ -41,3 +41,6 @@ nnUNet_results/
 Thumbs.db
 .idea/
 .vscode/
+
+# OMC session state
+.omc/
