@@ -44,6 +44,10 @@ def parser():
     result.add_argument("--prefetch", type=int, default=3, help="Cases loaded (and patch-sampled) ahead of the GPU")
     result.add_argument("--loader-threads", type=int, default=2, help="Threads that load cases and sample patches in the background")
     result.add_argument("--no-validation", action="store_true", help="Skip every validation pass (throughput benchmarks only; best.pt is never written)")
+    result.add_argument("--augment", action="store_true",
+                        help="GPU augmentation on training patches: rotation ±15°, scale 0.9-1.1, brightness/contrast/gamma, noise, light blur")
+    result.add_argument("--balanced-sampling", action="store_true",
+                        help="Foreground-centred patches pick a present label uniformly first, so small classes are centred as often as large ones")
     return result
 
 
@@ -203,7 +207,7 @@ def main(argv=None):
         # so it is deterministic per seed and thread-safe with several loader threads.
         case, seed = item
         image, label = load_case(case)
-        return sample_patches(image, label, args.patch_size, np.random.default_rng(seed), args.patches_per_case)
+        return sample_patches(image, label, args.patch_size, np.random.default_rng(seed), args.patches_per_case, balanced=args.balanced_sampling)
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name if args.device == "auto" else args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -230,6 +234,8 @@ def main(argv=None):
                 "torch_version": str(torch.__version__), "monai_version": str(monai.__version__),
                 "validation_grid": "canonical_resampled", "loss": "DiceCE", "batch_size": args.batch_size,
                 "lr_schedule": "cosine_to_1pct" if scheduler else "constant", "weight_decay": 1e-5, "grad_clip_norm": 12.0,
+                "augmentation": "rotation15_scale0.9-1.1_intensity_noise_blur" if args.augment else "flips_only",
+                "patch_sampling": "label_balanced_foreground" if args.balanced_sampling else "voxel_proportional_foreground",
                 "device": device.type, "amp": "bfloat16_autocast" if use_amp else None, "val_every": args.val_every,
                 "train_cases": len(train_cases), "val_cases": len(val_cases), "patches_per_case": args.patches_per_case,
                 "preprocessing_cache": None if cache_summary is None else {"dir": cache_summary["cache_dir"], "image_dtype": "float16"}}
@@ -240,10 +246,16 @@ def main(argv=None):
     # Patches from consecutive cases are pooled and drawn at random so a batch mixes cases.
     pool_threshold = max(2 * args.batch_size, args.patches_per_case + args.batch_size)
 
+    augment_generator = torch.Generator(device=device.type).manual_seed(args.seed) if args.augment else None
+    if args.augment:
+        from .augment import augment_batch
+
     def train_batch(batch, epoch):
         nonlocal global_step
         inputs = batch[0].to(device, non_blocking=True)
         targets = batch[1].to(device, non_blocking=True)
+        if augment_generator is not None:
+            inputs, targets = augment_batch(inputs, targets, augment_generator)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             logits = model(inputs)

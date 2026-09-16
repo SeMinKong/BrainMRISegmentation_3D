@@ -97,8 +97,12 @@ def save_prediction(class_indices, affine, original, output_path: Path, labels: 
     nib.save(result, str(output_path))
 
 
-def sample_patches(image, label, patch_size, rng, count: int):
+def sample_patches(image, label, patch_size, rng, count: int, *, balanced: bool = False):
     """Foreground-centred sampling on half of patches; random spatial flips.
+
+    `balanced=True` picks the foreground centre by first choosing one of the labels present in the case
+    uniformly and then a voxel of that label, so small classes (NETC) are centred as often as large ones
+    instead of in proportion to their voxel count.
 
     Padding and the foreground index are computed once per case, not once per patch:
     on a 240x240x155 volume that is the difference between ~1 s and ~50 ms per case.
@@ -110,10 +114,15 @@ def sample_patches(image, label, patch_size, rng, count: int):
         image = np.pad(image, [(0, 0), *padding])
         label = np.pad(label, padding)
     foreground = np.argwhere(label > 0)
+    per_label = {int(value): np.argwhere(label == value) for value in np.unique(label) if value > 0} if balanced else {}
     patches = []
     for _ in range(count):
         if len(foreground) and rng.random() < 0.5:
-            center = foreground[rng.integers(len(foreground))]
+            if per_label:
+                voxels = per_label[int(rng.choice(sorted(per_label)))]
+                center = voxels[rng.integers(len(voxels))]
+            else:
+                center = foreground[rng.integers(len(foreground))]
         else:
             center = [rng.integers(size) for size in label.shape]
         starts = [int(np.clip(c - p // 2, 0, d - p)) for c, p, d in zip(center, patch_size, label.shape)]
