@@ -12,6 +12,23 @@ export type Case = {
   modalities: string[];
   segmentations: Segmentation[];
   labels: Label[];
+  study?: { patient_id?: string | null; split?: string | null; manifest?: string | null };
+};
+export const sourceLabel = (c: Case) =>
+  c.demo ? "합성 데모" : c.source === "linked" ? "MU-Glioma-Post" : "NIfTI 볼륨";
+export const sourceDescription = (c: Case) =>
+  c.demo
+    ? "조작 연습용 가상 데이터"
+    : c.source === "linked"
+      ? "data/ 원본 폴더에서 직접 연결한 실제 MRI"
+      : "로컬에서 가져온 MRI";
+export type ModelTraining = {
+  validation_mean_dice?: number | null;
+  validated_epoch?: number | null;
+  epoch?: number | null;
+  global_step?: number | null;
+  train_cases?: number | null;
+  val_cases?: number | null;
 };
 export type Model = {
   id: string;
@@ -19,6 +36,8 @@ export type Model = {
   available: boolean;
   reason?: string;
   description: string;
+  demo_only?: boolean;
+  training?: ModelTraining;
 };
 export type Job = {
   id: string;
