@@ -65,6 +65,8 @@ python -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model swinu
 - `--batch-size B`: 연속 사례들의 패치를 풀에 모아 무작위로 B개씩 뽑아 한 step을 만듭니다(같은 배치에 여러 사례가 섞임). 기본 1.
 - `--cosine`: epoch 단위 cosine annealing으로 학습률을 `--lr`의 1%까지 낮춥니다.
 - `--sw-batch-size`: 검증 sliding-window에서 한 번에 넣는 창 수(기본 4).
+- `--augment`: 학습 패치에만 GPU 증강을 적용합니다(`ml/augment.py`). 무작위 축 회전 ±15°, 크기 0.9~1.1(영상 3선형·라벨 최근접), 밝기·대비 ±15 %, 감마 1/1.4~1.4, 가우시안 노이즈(σ ≤ 0.08), 3탭 블러(채널의 약 30 %). 검증·추론에는 적용하지 않습니다. RTX 5080 기준 step당 약 +18 %.
+- `--balanced-sampling`: 전경 중심 패치를 뽑을 때 사례에 있는 라벨을 균등하게 먼저 고른 뒤 그 라벨의 복셀을 중심으로 삼습니다. NETC처럼 작은 영역이 패치 중심이 되는 빈도를 높입니다.
 - 학습 로그의 `epoch_complete`에는 `train_seconds`와 `validation_seconds`가 따로 기록됩니다.
 - 웹 추론(`ml.adapters`)은 캐시를 쓰지 않고 항상 원본에서 float32로 전처리합니다. float16 저장으로 생기는 차이는 z-score 기준 약 1e-3 수준입니다.
 

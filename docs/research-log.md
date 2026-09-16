@@ -1,0 +1,176 @@
+# 연구 일지
+
+MU-Glioma-Post(치료 후 교종 MRI) 3D 분할 모델을 만들고 웹에서 확인하는 과정의 기록입니다. 실험마다 **무엇을, 왜, 어떻게 했고 결과가 어땠는지**를 숫자와 함께 남깁니다. 재현 명령은 각 항목에 있고, 생성 파일은 `runs/` 아래(Git 미포함)에 있습니다. 새 실험은 아래에 날짜순으로 추가합니다.
+
+## 요약표
+
+| 실행 | 설정 | 검증 평균 Dice (최고) | 비고 |
+| --- | --- | --- | --- |
+| `runs/unet3d` (2026-09-15) | 3D U-Net 16채널, 배치 1, 160³, 캐시 없음 | 0.548 (epoch 10) | epoch 12에서 중단, 기준 실행 |
+| `runs/unet3d-32ch` (2026-09-15~16) | 3D U-Net 32채널, 배치 2, 160³, bf16, cosine, 150 epoch | **0.702 (epoch 125)** | 현재 웹에 연결된 모델 |
+| `runs/unet3d-aug` (2026-09-16~) | 위 + 공간·밝기 증강 + 라벨 균등 샘플링 | 진행 중 | 과적합 대응 실험 |
+
+검증은 항상 같은 136개 검사(환자 40명, 학습과 환자 분리)입니다. Dice는 검증 볼륨 전체를 학습 격자(RAS, 1 mm)에서 예측해 클래스별로 계산한 뒤, 정답과 예측이 모두 빈 클래스를 제외하고 평균한 값입니다.
+
+## 연구 환경
+
+단일 PC에서 모든 학습·추론·웹을 실행했습니다. 아래 숫자는 이 문서의 시간·속도 기록의 기준입니다.
+
+| 항목 | 값 |
+| --- | --- |
+| GPU | NVIDIA GeForce RTX 5080, 16 GB(15.9 GiB 가용), compute capability 12.0(Blackwell), 드라이버 591.86(CUDA 13.1) |
+| CPU | AMD Ryzen 7 9800X3D, 8코어(감지된 논리 프로세서 8) |
+| 메모리 | 31.1 GB |
+| 저장장치 | WD_BLACK SN8100 1 TB NVMe. 원본 11.9 GB + 전처리 캐시 45.9 GB + 체크포인트 |
+| OS | Windows 11 Home 10.0.26200 |
+| Python | 3.11.14, 가상환경 `.venv` (`python -E`로 외부 PYTHONPATH 차단) |
+| 딥러닝 | PyTorch 2.14.0+cu130 (CUDA 13.0, cuDNN 9.24), MONAI 1.6.0, einops 0.8.2 |
+| 데이터 처리 | numpy 2.4.6, nibabel 5.4.2, scipy 1.17.1, scikit-image 0.26.0 |
+| 웹 | FastAPI 0.141.1 + uvicorn, React 19, three.js 0.180, Vite 7, Node 25.9 |
+| 데이터 | MU-Glioma-Post v1 (TCIA, 2025-03-21 배포), 240×240×155, 1 mm, LPS, skull-stripped |
+
+학습은 데스크톱 세션과 분리된 프로세스(`Start-Process`)로 돌려 터미널을 닫아도 계속됩니다. 학습 로그는 `runs/<실행>/train.log`(JSON 한 줄씩), 지표는 `metrics.json`, 재현용 manifest 사본은 `resolved-manifest.json`, 설정과 환경 버전은 `metadata.json`과 체크포인트 안에 함께 저장됩니다. 웹 추론과 학습이 GPU를 같이 쓰면 학습이 느려지므로 본 실행 중에는 웹 추론을 피했습니다.
+
+---
+
+## 2026-09-10 · 데이터 점검과 학습 목록
+
+**한 일.** TCIA에서 받은 원본 2,978개 NIfTI(환자 203명, 검사 596회)를 전부 읽어 gzip CRC·SHA-256·shape·affine·라벨 값을 검사했습니다(`scripts/audit_mu_glioma_post.py`). 모든 파일이 240×240×155, 1 mm, LPS였고 손상은 없었습니다.
+
+**발견.**
+- 마스크 없는 검사 2개(`PatientID_0187/Timepoint_3`, `PatientID_0191/Timepoint_1`).
+- 서로 다른 환자 ID 사이에 MRI 4종이 완전히 같은 쌍 11개(22개 검사). 그중 8쌍은 마스크가 다름 → 어느 쪽이 맞는지 알 수 없어 둘 다 학습에서 보류.
+- `PatientID_0159/Timepoint_3`은 T1과 FLAIR 파일이 동일 → 보류.
+
+**결정.** 594개 중 23개를 보류하고 **571개 검사·환자 200명**을 학습 목록으로 확정(`data/mu-glioma-post-manifest.json`). 분할은 환자 단위이며 파일 내용이 같은 환자 ID들은 같은 그룹에 두었습니다(seed 42, 그룹 기준 검증 비율 0.2 → 학습 435 / 검증 136, 환자 160 / 40). 학습·검증 사이에 환자 ID나 동일 파일이 겹치는 경우는 0입니다.
+
+---
+
+## 2026-09-15 · 웹을 합성 데모에서 실데이터로 전환
+
+**문제.** 서버가 시작할 때 수학적으로 만든 합성 뇌 1개만 등록되고, 실제 데이터는 웹 업로드로 한 검사씩 넣어야 했습니다.
+
+**해결.** manifest의 571개 검사를 서버 시작 시 **원본 복사 없이 링크**하도록 `CaseStore.link_manifest`를 만들었습니다. 원본 파일의 헤더만 읽어(복셀은 읽지 않음) RAS 격자를 계산해 `case.json`에 기록하고, 볼륨을 읽을 때 `as_closest_canonical`로 LPS→RAS를 적용합니다. 571개 등록에 2.7초. 합성 데모는 실제 사례가 있으면 기본으로 숨깁니다(`MRI_DEMO_CASE=auto`).
+
+**검증.** 링크된 검사에서 단면·3D·통계 응답과, 내려받은 기준 마스크가 `as_closest_canonical`로 정리한 원본과 복셀·affine이 일치함을 확인했습니다.
+
+---
+
+## 2026-09-15 · 학습 환경 문제와 첫 실행
+
+### 문제 1 · GPU가 인식되지 않음
+`.venv`의 PyTorch가 `2.14.0+cpu`였습니다. Windows에서 PyPI의 torch는 CPU 전용이고, CUDA 빌드는 PyTorch 인덱스에서 받아야 합니다. RTX 5080(Blackwell)은 CUDA 12.8 이상 빌드가 필요하고 드라이버가 CUDA 13.1을 지원하므로 `cu130` 빌드를 설치했습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -E -m pip install --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps "torch==2.14.0+cu130"
+```
+
+주의: `pip install torch==2.14.0`은 "이미 설치됨"으로 끝나므로 `+cu130` 태그를 명시하거나 `--force-reinstall`이 필요합니다. `setup.ps1 -WithML`이 이제 이 인덱스를 사용합니다.
+
+### 문제 2 · 검증에 epoch마다 30분
+136개 검증 볼륨을 매 epoch 전부 sliding-window로 예측하면 학습보다 검증이 더 오래 걸립니다. `--val-every N`을 추가해 5 epoch마다 검증하고, `best.pt`는 검증한 epoch 중 최고만 저장하도록 바꿨습니다. bf16 autocast(`--amp`)도 함께 추가했습니다(손실·검증·추론은 float32 유지).
+
+### 기준 실행 `runs/unet3d`
+16채널 U-Net, 배치 1, 160³ 패치, 사례당 8패치, 학습률 1e-4 고정. **epoch당 25분**, GPU 사용률 1~2%. 병목은 매 epoch 435개 사례의 gzip NIfTI(2,175개 파일)를 다시 디코딩하는 것이었습니다. epoch 5 Dice 0.479, epoch 10 0.548. 아래 개선 후 epoch 12에서 중단하고 `best.pt`(epoch 10)는 보관했습니다.
+
+---
+
+## 2026-09-15 · 학습 속도 개선 (25분 → 2.8분/epoch)
+
+병목을 하나씩 측정하고 제거했습니다.
+
+| 단계 | 조치 | 측정 |
+| --- | --- | --- |
+| 1 | `ml/cache.py`: `prepare_case` 결과(RAS·1 mm·비영 복셀 z-score)를 사례별 float16 `.npz`로 저장. 원본 경로·크기·mtime·spacing·라벨로 키를 만들어 바뀐 것만 재생성 | 571개 생성 333초(프로세스 5개), 45.9 GB. 읽기 3~5초 → **0.10초/사례** |
+| 2 | 모델·배치 후보 11개를 bf16로 1 step씩 실측 | U-Net 16ch·b1 0.039 s(105 Mvox/s), 32ch·b1 0.047 s, **32ch·b2 0.080 s(102 Mvox/s, 12.9M 파라미터)**, 16ch·b4 0.113 s, Swin UNETR f24·128³ 0.27 s(7.7 Mvox/s), f48 0.37 s |
+| 3 | 패치 샘플링에서 패딩·전경 인덱스 계산을 사례당 1회로 줄이고, 로딩+샘플링을 스레드로 이동 | 스레드 1개 0.29 s/사례 → 4개 0.135 s/사례 |
+| 4 | 배치 조립(`np.stack`, pin_memory)을 메인 스레드에서 producer 스레드로 이동 | 0.132 s/step·GPU 61%·150 W → **0.108 s/step·GPU 81%(최대 98%)·199 W** |
+| 5 | 배치 4 시험 | 0.205 s/step = 패치당 0.051 s(배치 2와 동일), 8.0 GB. 갱신 횟수만 절반이라 **채택하지 않음** |
+
+Swin UNETR은 같은 시간에 U-Net의 1/13 복셀만 학습하므로 기준선 단계에서는 제외했습니다. 결론: 32채널 U-Net, 배치 2, 160³, 사례당 8패치.
+
+---
+
+## 2026-09-15 → 16 · 본 실행 `runs/unet3d-32ch`
+
+```powershell
+.\.venv\Scripts\python.exe -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --channels 32 64 128 256 320 --output runs/unet3d-32ch --epochs 150 --batch-size 2 --patch-size 160 160 160 --patches-per-case 8 --val-every 5 --amp --cosine --cache-dir runs/cache --prefetch 5 --loader-threads 4
+```
+
+**적용한 기법.**
+- 입력: T1, T1 조영, T2, FLAIR 4채널. RAS 정렬, 1 mm 재표본화(선형; 마스크는 최근접), 시퀀스별 비영 복셀 z-score.
+- 모델: MONAI residual 3D U-Net, 채널 32-64-128-256-320, residual unit 2, instance norm. 출력 5클래스(배경, NETC, SNFH, ET, RC).
+- 손실: Dice + Cross-Entropy(배경 제외, softmax).
+- 최적화: AdamW, 학습률 1e-4, weight decay 1e-5, gradient clipping 12, cosine annealing으로 150 epoch에 걸쳐 1e-6까지 감소.
+- 패치: 160³, 사례당 8개. 절반은 전경 복셀 중심, 절반은 무작위. 세 축 무작위 반전. 연속 사례의 패치를 풀에 모아 배치 2로 섞음.
+- 정밀도: 학습 forward/backward만 bf16 autocast, 손실·검증은 float32. cuDNN benchmark, TF32 허용.
+
+**시간.** 총 7.5시간. epoch 약 167초, 검증(136개) 약 101~106초.
+
+**결과.** 검증 평균 Dice 추이(5 epoch마다):
+
+| epoch | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 | 55 | 60 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Dice | 0.555 | 0.545 | 0.594 | 0.594 | 0.606 | 0.631 | 0.645 | 0.606 | 0.648 | 0.657 | 0.672 | 0.663 |
+
+| epoch | 65 | 70 | 75 | 80 | 85 | 90 | 95 | 100 | 105 | 110 | 115 | 120 | 125 | 130 | 135 | 140 | 145 | 150 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Dice | 0.664 | 0.666 | 0.670 | 0.680 | 0.697 | 0.694 | 0.686 | 0.694 | 0.698 | 0.699 | 0.695 | 0.701 | **0.702** | 0.699 | 0.701 | 0.700 | 0.700 | 0.701 |
+
+라벨별(최고 epoch 125, 검증 136개, 평균 / 중앙값): SNFH 0.892 / 0.941, ET 0.766 / 0.898, RC 0.595 / 0.759, **NETC 0.441 / 0.408**.
+
+**관찰.**
+- 학습 손실은 epoch 70 0.306 → 75 0.192 → 80 0.154 → 150 0.103으로 후반에 크게 떨어졌지만 검증은 epoch 85 이후 0.70 근처에서 정체 → **과적합**. 손실 급락 시점(epoch 75)은 cosine 스케줄로 학습률이 초기의 절반(약 5e-5)이 된 때와 겹칩니다.
+- NETC는 중앙값(0.41)이 평균(0.44)보다 낮아, 절반 넘는 검사에서 아예 놓치거나 크게 어긋납니다. 신호가 주변과 비슷하고 영역이 작은 것이 원인으로 보입니다.
+- RC는 정답에 없는 검사가 많아(136 중 17개는 평균에서 제외) 편차가 큽니다.
+
+**웹 추론 검증.** `MRI_UNET_CHECKPOINT=runs/unet3d-32ch/best.pt`로 검증 사례 `PatientID_0005_Timepoint_3` 추론 8.2초(RTX 5080). 출력 격자가 원본과 일치. 이 사례는 전체 전경 Dice 0.972로 쉬운 사례입니다.
+
+---
+
+## 웹 추론 파이프라인 (현재 구현)
+
+1. **요청**: 웹이 `POST /api/jobs {case_id, model_id}`를 보내면 서버가 단일 워커 큐에 넣고 상태(대기·실행·완료·실패)를 `GET /api/jobs/{id}`로 알립니다.
+2. **입력 준비** (`ml/data.py: prepare_case`): 사례의 T1을 기준으로 4시퀀스가 같은 격자인지 확인 → `as_closest_canonical`로 RAS → 체크포인트에 기록된 spacing(1 mm)으로 재표본화 → 시퀀스별로 0이 아닌 복셀만 평균 0·표준편차 1로 정규화(0은 그대로).
+3. **체크포인트 검증** (`ml/adapters.py: validate_metadata`): `format_version`, 모델 종류, 채널 순서(t1, t1ce, t2, flair), 정규화 방식, spacing, 패치 크기, optimizer step 수, 라벨 의미가 MU-Glioma-Post와 같은지 확인. `torch.load(weights_only=True)`로만 읽습니다.
+4. **추론**: MONAI `sliding_window_inference`, 창 160³, 겹침 0.5, 가우시안 가중 합치기. 창 계산은 GPU, 합치기는 CPU(전체 logits 5×240×240×155를 GPU에 두지 않기 위해). argmax로 클래스 인덱스 → manifest 라벨 값(0,1,2,3,4)으로 매핑.
+5. **격자 복원** (`save_prediction`): 예측을 입력 T1의 원래 shape·affine으로 최근접 재표본화해 uint8 NIfTI로 저장.
+6. **저장·통계**: 서버가 결과를 다시 RAS로 읽어 사례 격자와 일치하는지 검증한 뒤 `.data/<case>/seg-pred-*.nii.gz`로 저장하고, `/stats`에서 판독 마스크 대비 라벨별 Dice·부피를 계산합니다. 웹의 Dice는 원본 격자(RAS) 기준이며, 학습 로그의 검증 Dice(재표본 격자, 빈 클래스 제외 평균)와 정의가 조금 다릅니다.
+
+---
+
+## 트러블슈팅 기록
+
+| 증상 | 원인 | 해결 |
+| --- | --- | --- |
+| `torch.cuda.is_available()`가 False | PyPI Windows torch는 CPU 빌드 | PyTorch 인덱스 `cu130`에서 `--force-reinstall --no-deps` 설치 |
+| epoch당 25분, GPU 1~2% | 매 epoch gzip NIfTI 재디코딩 | 전처리 결과 float16 `.npz` 캐시(`--cache-dir`) |
+| 캐시 후에도 GPU 40~60% | 메인 스레드의 패치 샘플링·배치 스택·H2D 복사 | 로더 스레드 4개 + producer 스레드 + pinned memory |
+| 손실 급락 후 검증 정체 | 과적합(증강이 반전만 있음) | 증강·라벨 균등 샘플링 실험(아래) |
+| 웹 3D mesh 응답 7.3초 | 13 MB JSON을 매 요청 최고 압축률로 gzip + 범용 JSON 인코더 | 직렬화·gzip 결과를 사례별로 캐시(첫 1.7초, 이후 30 ms) |
+| 단면 휠 스크롤이 느림 | 휠마다 서버에서 PNG 렌더·전송 | uint8 볼륨을 한 번 받아 브라우저 캔버스에서 그림(틱당 4 ms) |
+| 3D 뇌 표면이 뭉개짐 | 실효 해상도 2 mm + 닫힘 연산 2회 | 1 mm 격자, 뇌척수액(하위 22 %) 제외, σ 1.0 블러 후 marching cubes |
+| 새 빌드가 화면에 안 반영 | 브라우저가 index.html을 캐시 | `Cache-Control: no-cache` 헤더, 서버 재시작 |
+| 3D 탭 전환 시 시점 초기화 | 뷰어마다 카메라가 독립 | 사례별 공유 카메라 저장소(`cameraSync.ts`), 자동 회전도 공유 루프 |
+| pytest가 개발자 로컬 데이터를 링크 | 기본 manifest 자동 탐색 | 테스트 픽스처에 `source_manifest=None` |
+
+---
+
+## 2026-09-16 · 실험 `runs/unet3d-aug` (진행 중)
+
+**가설.** 반전만 있는 증강으로는 435개 검사를 150 epoch 동안 외워 버립니다. 공간·밝기 증강과 라벨 균등 샘플링을 넣으면 검증 Dice, 특히 NETC가 오를 것입니다.
+
+**변경.**
+- `--augment`: GPU에서 배치 단위로 무작위 회전(±15°), 크기(0.9~1.1), 밝기·대비·감마, 가우시안 노이즈, 가우시안 블러. 영상은 3선형, 라벨은 최근접 보간. 학습에만 적용하고 검증·추론에는 적용하지 않습니다.
+- `--balanced-sampling`: 전경 중심 패치를 뽑을 때 복셀 수에 비례해 뽑는 대신, **그 사례에 있는 라벨 중 하나를 균등하게 고른 뒤** 그 라벨의 복셀을 중심으로 삼습니다. 작은 NETC가 패치 중심이 될 확률이 크게 올라갑니다.
+- 그 외 설정은 `runs/unet3d-32ch`와 동일(같은 seed, split, 모델, 스케줄).
+
+```powershell
+.\.venv\Scripts\python.exe -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --channels 32 64 128 256 320 --output runs/unet3d-aug --epochs 150 --batch-size 2 --patch-size 160 160 160 --patches-per-case 8 --val-every 5 --amp --cosine --cache-dir runs/cache --prefetch 5 --loader-threads 4 --augment --balanced-sampling
+```
+
+**구현 중 트러블슈팅.** 첫 구현은 노이즈 텐서(2×4×160³ = 3,300만 원소)를 CPU 난수 생성기로 만들어 GPU로 복사했고, step 시간이 0.108 → 0.233초(GPU 48 %)로 두 배가 됐습니다. 난수 생성기를 CUDA 장치에 두자 0.127초·GPU 89 %·7.2 GB로 돌아왔습니다(증강 비용 약 +18 %). 라벨 균등 샘플링의 `argwhere` 4회는 로더 스레드에서 처리되어 GPU 시간에는 영향이 없습니다.
+
+**테스트.** `ml/tests/test_augment.py`: 증강 후 shape·정수 라벨 집합 유지, 같은 seed 재현, 빈 볼륨은 빈 채로 유지, 균등 샘플링이 27복셀짜리 작은 라벨을 복셀 비례 방식보다 3배 이상 자주 패치 중심으로 뽑음.
+
+결과는 실행이 끝난 뒤 이 항목에 추가합니다.
