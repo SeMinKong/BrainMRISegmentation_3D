@@ -48,13 +48,27 @@ python -E -m ml.manifest --data-root D:/datasets/MU-Glioma-Post --patient-regex 
 자동 탐색은 **명시적인 `--patient-regex`를 요구**하며 첫 캡처 그룹을 환자 ID로 사용합니다. 배포본의 환자 식별 규칙에 맞는지 생성된 manifest를 직접 확인해야 합니다. 종단 검사도 같은 환자에 묶여야 합니다. 정규식이 맞지 않는 파일명은 자동 추측하지 않고 거절합니다. 검증 분할은 환자 ID에 고정 seed를 적용해 생성하며, train과 val에 같은 patient_id가 있으면 학습이 중단됩니다. 이 검사는 잘못 기입한 환자 ID까지 알아낼 수는 없습니다.
 
 ```powershell
-python -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --output runs/unet3d --epochs 100 --patch-size 64 64 64 --spacing 1 1 1
-python -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model swinunetr --output runs/swinunetr --epochs 100 --patch-size 64 64 64
+# RTX 5080 16 GB 기준 본 실행 설정 (2026-09-15)
+python -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --channels 32 64 128 256 320 --output runs/unet3d-32ch --epochs 200 --batch-size 2 --patch-size 160 160 160 --patches-per-case 8 --val-every 5 --amp --cosine --cache-dir runs/cache --prefetch 5 --loader-threads 4
+python -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model swinunetr --output runs/swinunetr --epochs 30 --patch-size 128 128 128 --val-every 5 --amp --cache-dir runs/cache
 ```
 
-3D U-Net 기본 채널은 `16,32,64,128,256`, Swin UNETR의 feature size는 24입니다. Swin 패치는 각 변이 32의 배수이면서 32보다 커야 합니다. 기본 U-Net 패치는 16의 배수이면서 16보다 커야 합니다. GPU 메모리가 부족하면 `--channels 8 16 32 64` 또는 적절한 패치 크기로 U-Net 규모부터 줄입니다. 배치는 1이고 MRI 전체를 한 사례씩 메모리에 로드하므로 CPU RAM도 필요합니다. GPU용 혼합 정밀도, 디스크 캐시, 분산 학습은 후속 작업입니다.
+2026-09-15 RTX 5080 측정(bf16, 1 step): U-Net 16채널·배치 1·160³ 0.039 s(105 Mvox/s), U-Net 32채널·배치 2·160³ 0.080 s(102 Mvox/s, 12.9M 파라미터), Swin UNETR feature 24·128³ 0.27 s(7.7 Mvox/s), feature 48 0.37 s. 같은 시간에 Swin은 U-Net의 1/13 복셀만 학습하므로 기준선 확보 단계에서는 U-Net 32채널을 먼저 돌립니다.
 
-`best.pt`, `last.pt`, `metadata.json`, `metrics.json`, `resolved-manifest.json`이 저장됩니다. 메타데이터에는 실제 optimizer step, 모델 설정, 라벨, 채널 순서, 전처리, seed, 환자 분할, manifest hash, 라이브러리 버전, validation Dice가 들어갑니다. 현재 optimizer 복원을 통한 중단 재개 기능은 없습니다.
+3D U-Net 기본 채널은 `16,32,64,128,256`, Swin UNETR의 feature size는 24입니다. Swin 패치는 각 변이 32의 배수이면서 32보다 커야 합니다. 기본 U-Net 패치는 16의 배수이면서 16보다 커야 합니다. GPU 메모리가 부족하면 `--channels 8 16 32 64` 또는 적절한 패치 크기로 U-Net 규모부터 줄입니다. 배치는 1이고 MRI 전체를 한 사례씩 메모리에 로드하므로 CPU RAM도 필요합니다.
+
+- `--val-every N`: 전체 검증 볼륨(136개)에 대한 sliding-window 검증을 N epoch마다 실행합니다. 마지막 epoch에는 항상 실행합니다. `last.pt`는 매 epoch 저장하고, `best.pt`는 **검증한 epoch 중** 평균 Dice가 가장 높은 가중치만 담습니다.
+- `--amp`: CUDA에서 학습 forward/backward만 bfloat16 autocast로 실행합니다. 손실 계산, 검증, 웹 추론은 float32 그대로입니다. CPU에서는 무시됩니다.
+- Windows에서 CUDA PyTorch는 PyPI가 아니라 PyTorch 인덱스(`cu130`)에서 설치해야 하며 `setup.ps1 -WithML`이 이를 처리합니다. RTX 50 시리즈는 CUDA 13 빌드가 필요합니다.
+- `--cache-dir DIR`: `prepare_case` 결과(RAS·목표 spacing·z-score)를 사례별 `.npz`(영상 float16, 라벨 uint8)로 한 번 저장하고 학습·검증 모두 여기서 읽습니다. 첫 실행 시 `--cache-workers`개 프로세스로 만들며(기본 CPU-2, 최대 6) 원본 파일의 경로·크기·수정 시각·spacing·라벨이 바뀐 항목만 다시 만듭니다. MU-Glioma-Post 571개 기준 약 45 GB입니다. 캐시 없이 돌리면 매 epoch 435개 사례의 gzip을 다시 읽어 GPU보다 디스크·CPU가 병목이 됩니다.
+- `--prefetch N`, `--loader-threads T`: T개 스레드가 다음 N개 사례를 미리 읽고 **패치 샘플링까지 끝내** GPU 대기를 줄입니다. 사례별 seed를 메인 스레드에서 뽑아 넘기므로 스레드 수와 무관하게 같은 seed면 같은 패치가 나옵니다. 측정: 캐시 읽기+8패치 샘플링이 스레드 1개 0.29 s/사례, 4개 0.135 s/사례.
+- `--batch-size B`: 연속 사례들의 패치를 풀에 모아 무작위로 B개씩 뽑아 한 step을 만듭니다(같은 배치에 여러 사례가 섞임). 기본 1.
+- `--cosine`: epoch 단위 cosine annealing으로 학습률을 `--lr`의 1%까지 낮춥니다.
+- `--sw-batch-size`: 검증 sliding-window에서 한 번에 넣는 창 수(기본 4).
+- 학습 로그의 `epoch_complete`에는 `train_seconds`와 `validation_seconds`가 따로 기록됩니다.
+- 웹 추론(`ml.adapters`)은 캐시를 쓰지 않고 항상 원본에서 float32로 전처리합니다. float16 저장으로 생기는 차이는 z-score 기준 약 1e-3 수준입니다.
+
+`best.pt`, `last.pt`, `metadata.json`, `metrics.json`, `resolved-manifest.json`이 저장됩니다. 메타데이터에는 실제 optimizer step, 모델 설정, 라벨, 채널 순서, 전처리, seed, 환자 분할, manifest hash, 라이브러리 버전, 장치·AMP 사용 여부, 마지막으로 검증한 epoch과 validation Dice가 들어갑니다. 현재 optimizer 복원을 통한 중단 재개 기능은 없습니다.
 
 검증 Dice는 재표본화된 전체 볼륨의 클래스별 값입니다. 정답과 예측이 둘 다 빈 클래스는 `null`이며 평균에서 제외합니다. 한쪽만 빈 경우는 0입니다. 평균은 유효한 case-class Dice의 산술평균입니다. 병변별 개별 평가는 수행하지 않습니다. 환자 단위 홀드아웃, 하이퍼파라미터 고정, 원래 격자 평가, 경계 거리·병변 단위 평가를 갖춘 실험으로 확장해야 합니다.
 

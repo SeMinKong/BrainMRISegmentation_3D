@@ -4,9 +4,9 @@
 
 **MU-Glioma-Post MRI 볼륨을 직접 다루고, 3D 종양 분할 결과를 분리·관찰·비교하는 로컬 연구·학습용 워크스페이스입니다.** 치료 후 교종 MRI의 네 시퀀스와 NETC·SNFH·ET·RC 라벨을 기본 데이터 계약으로 사용하고 3D U-Net, nnU-Net v2, Swin UNETR을 연결할 수 있게 구성했습니다.
 
-초기 MVP에는 실행 가능한 웹·API·NIfTI 처리·모델 학습 코드가 들어 있습니다. **MU-Glioma-Post 데이터와 학습된 가중치는 포함하지 않습니다.** 처음 실행하면 수학적으로 생성한 합성 MRI와 마스크가 나타나므로, 데이터 다운로드나 GPU 없이 UI를 먼저 사용할 수 있습니다. 합성 데모의 예측과 점수는 실제 모델 성능이 아닙니다.
+초기 MVP에는 실행 가능한 웹·API·NIfTI 처리·모델 학습 코드가 들어 있습니다. **MU-Glioma-Post 데이터와 학습된 가중치는 포함하지 않습니다.** `data/mu-glioma-post-manifest.json`이 있으면 서버가 시작할 때 그 안의 실제 검사를 모두 웹 사례 목록에 **원본 복사 없이 연결**합니다. manifest가 없을 때만 수학적으로 생성한 합성 MRI와 마스크가 나타나므로, 데이터 다운로드나 GPU 없이도 UI를 먼저 사용할 수 있습니다. 합성 데모의 예측과 점수는 실제 모델 성능이 아닙니다.
 
-**현재 상태 — 2026-09-10:** 실제 다운로드 파일 2,978개의 무결성·입력 형식을 점검했고, 원본 파일명을 그대로 읽는 가져오기와 중복 검사·학습 목록 생성 도구를 추가했습니다. 점검한 데이터에서 571개 검사를 학습 후보로 정리했으며, 실제 데이터로 모델 학습은 아직 실행하지 않았습니다. 자세한 결과는 [검증 기록](docs/verification.md)에 있습니다.
+**현재 상태 — 2026-09-15:** 실제 다운로드 파일 2,978개의 무결성·입력 형식을 점검했고, 571개 검사를 학습 후보로 정리했습니다. 웹은 이 571개 검사를 기본 사례로 사용하며 합성 데모는 기본에서 제외됩니다. 실제 데이터로 모델 학습은 아직 실행하지 않았습니다. 자세한 결과는 [검증 기록](docs/verification.md)에 있습니다.
 
 ## 빠르게 실행하기
 
@@ -22,7 +22,7 @@ Set-Location C:\Users\semin\Desktop\01_SeMinKong\git\BrainMRISegmentation_3D
 - API 문서: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - 종료: 서버를 실행한 터미널에서 `Ctrl+C`
 
-`setup.ps1`은 `.venv`에 Python 의존성을 설치하고 프런트엔드를 빌드합니다. `start.ps1`은 API와 빌드된 웹을 하나의 로컬 주소로 제공합니다. 기본 설치에는 PyTorch가 필요하지 않습니다. 첫 서버 시작 시 `.data/`에 합성 사례가 생성됩니다.
+`setup.ps1`은 `.venv`에 Python 의존성을 설치하고 프런트엔드를 빌드합니다. `start.ps1`은 API와 빌드된 웹을 하나의 로컬 주소로 제공합니다. 기본 설치에는 PyTorch가 필요하지 않습니다. `data/mu-glioma-post-manifest.json`이 있으면 시작 시 실제 검사 571개가 연결되고(약 3초), 없으면 `.data/`에 합성 사례가 생성됩니다.
 
 스크립트 실행 정책으로 막히면 현재 PowerShell 세션에만 적용한 후 다시 실행할 수 있습니다.
 
@@ -32,25 +32,27 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## 웹에서 해볼 수 있는 것
 
+웹은 한 가지 흐름에 맞춰져 있습니다. **학습에 쓰지 않은 검사를 고른다 → 내 모델로 예측한다 → 판독 마스크(정답)와 비교한다.** 의료 지식이 없어도 읽을 수 있도록 모든 전문 용어 옆에 `?` 설명이 있고, 하단에 용어 설명 모음이 있습니다. UI는 밝은 단색 표면에 그림자 쌍으로 깊이를 주는 소프트 UI(뉴모피즘) 스타일입니다.
+
 | 화면 | 기능 |
 | --- | --- |
-| **워크스페이스** | MRI 시퀀스 전환, 축상·관상·시상 단면 탐색, 마스크 오버레이, 3D 뇌·분할 영역 표시 |
-| **종양 분리** | `종양만 보기`로 뇌 표면 숨기기, 라벨별 표시·숨김, `영역 펼쳐 보기`로 겹쳐진 내부 영역 관찰 |
-| **보기 설정** | 3D 회전·이동·확대·자동 회전·전체 화면, 뇌/마스크 불투명도, 영상 윈도우, 보기 초기화 |
-| **결과 비교** | 동일 사례의 마스크 두 개를 나란히 표시, 전체 전경 Dice·HD95·부피 차이 계산 |
-| **영역 정보** | 라벨별 복셀 수 기반 부피(mL), 연결 성분 수, 일관된 영역 색상 |
-| **추론 모니터링** | 모델 연결 상태, 작업 대기·실행·완료·실패, 진행 단계와 경과 시간, 사례별 추론 기록 |
-| **가져오기·저장** | 실제 `.nii`/`.nii.gz` 사례 업로드, 선택한 분할 마스크를 `.nii.gz`로 다운로드 |
-| **모델 학습 탭** | 모델별 공부 방향, 논문·공식 자료, 연결 상태와 추론 기록; 학습 실행은 CLI에서 수행 |
+| **환자 목록** | 기본 필터가 **학습에 안 쓴 검사**(검증 136개). 환자별 검사 시점(1차·2차…) 묶음, 환자 번호 검색, 예측 완료 표시 |
+| **검사 카드** | 환자·검사, `학습에 쓰지 않은 검사`/`학습에 쓴 검사 · 참고용` 배지, **내 모델로 예측하기** 버튼과 진행률(GPU 약 10초), 연결된 모델의 검증 평균 일치도 |
+| **결과 카드** | 전체 일치도(Dice)와 한 줄 판정(매우 일치·대체로 일치·부분 일치·많이 다름), 영역별 판독/예측 부피와 일치도, 한쪽에만 있는 영역은 말로 표시, 영역 표시 토글, 마스크 `.nii.gz` 저장 |
+| **뷰어** | `판독 마스크 / 내 모델 예측 / 나란히 비교` 전환. 황금비 2열: 왼쪽 결과 카드와 3D 모형(`뇌 + 종양`/`종양만 분리`, 영역 펼쳐 보기), 오른쪽 시퀀스 조절과 축상·관상·시상 단면. 나란히 비교는 3D 두 개(판독 | 예측)와 같은 단면 두 개를 함께 보여 주며, 3D 시점·자동 회전은 탭을 바꿔도 유지되고 두 3D는 함께 회전함. 영역에 마우스를 올리면 이름·부피가 뜨고, `영역 펼쳐 보기`는 조각을 벌려 라벨을 붙이며, 나침반이 R/L·A/P·S/I 방향을 표시함. 단면은 볼륨을 한 번 받아 브라우저에서 그려 휠·슬라이더가 즉시 반영됨 |
+| **시점별 부피** | 검사가 여러 번인 환자는 판독 마스크 기준 시점별 부피 막대 |
+| **용어 설명** | 검증 검사, 판독 마스크, 모델 예측, 일치도, 부피, 시퀀스, 단면, 영역 4종, 모델 |
+| **가져오기** | manifest에 없는 `.nii`/`.nii.gz` 검사를 직접 추가 |
 
 처음에는 다음 순서로 조작해 보세요.
 
-1. 기본 **합성 데모**에서 시퀀스를 `T1ce` 또는 `FLAIR`로 선택합니다.
-2. 세 단면의 슬라이더나 마우스 휠로 분할 영역을 찾아봅니다.
-3. **종양만 보기**를 누르고, **영역 펼쳐 보기**를 켭니다. 하단 눈 아이콘으로 관심 라벨만 남겨 내부 구조를 확인합니다.
-4. **결과 비교**에서 `Reference mask`와 `Demo · perturbed reference`를 비교합니다.
-5. 왼쪽 **데모 파이프라인 실행**으로 작업 완료와 새 결과 추가 흐름을 확인합니다.
-6. 실제 데이터가 준비되면 **NIfTI 가져오기**로 한 사례의 MRI와 선택적인 정답 마스크를 함께 추가합니다.
+1. 첫 화면은 학습에 쓰지 않은 검사 하나를 자동으로 보여 줍니다. **내 모델로 예측하기**를 누르고 10초 정도 기다립니다.
+2. 결과 카드의 전체 일치도와 영역별 표를 읽습니다. 모르는 용어는 옆의 `?`를 누릅니다.
+3. 뷰어에서 **나란히 비교**로 판독 마스크(왼쪽)와 예측(오른쪽)의 같은 단면을 함께 넘기며 색이 다른 곳을 찾습니다. 단면은 휠·슬라이더·화살표 키로 넘깁니다.
+4. **종양 위치로**로 세 단면을 종양 중심에 맞추고, 3D에서 **종양만 분리**로 모양을 확인합니다.
+5. 왼쪽 목록에서 다른 환자·시점을 골라 반복합니다. 학습에 쓴 검사는 필터를 바꾸면 볼 수 있지만 결과는 참고용입니다.
+
+합성 데모를 함께 보려면 `.env`에 `MRI_DEMO_CASE=always`를 넣습니다. 그러면 `데모 파이프라인 실행`과 `Demo · perturbed reference` 비교를 합성 사례에서만 사용할 수 있습니다.
 
 `영역 펼쳐 보기`는 관찰을 위해 라벨별 3D 표면의 표시 위치를 이동합니다. 원래 마스크·부피·다운로드 파일은 바뀌지 않으며, 토글을 끄면 실제 공간 위치로 돌아갑니다. 연결 성분 수는 각 라벨의 연결된 복셀 집합 수이며 독립적인 종양 개수 판정이 아닙니다.
 
@@ -71,7 +73,9 @@ data/MU-Glioma-Post/PatientID_0003/Timepoint_1/
 └── PatientID_0003_Timepoint_1_tumorMask.nii.gz   # 정답 마스크
 ```
 
-**`data/`에 파일을 넣는 것만으로 웹 사례 목록에 자동 등록되지는 않습니다.** 웹의 **NIfTI 가져오기**에서 한 `Timepoint_*` 폴더의 MRI 4개와 정답 마스크가 있으면 함께 선택하고, `MU-Glioma-Post` 프리셋으로 가져옵니다. 여러 환자나 검사 시점의 파일을 한 사례로 섞지 않습니다.
+**웹 사례 목록은 manifest를 기준으로 채워집니다.** 아래 **데이터 점검과 학습 목록 준비**를 한 번 실행해 `data/mu-glioma-post-manifest.json`을 만들면, 서버가 시작할 때 그 안의 모든 검사를 사례로 연결합니다. 원본 파일은 복사·이동·수정하지 않고 `.data/<검사 ID>/case.json`과 웹에서 만든 예측 마스크만 저장합니다. LPS 원본은 읽을 때 RAS로 정리되며, 다운로드하는 `Reference mask`도 이 RAS 격자를 따릅니다. 보류한 중복 사례까지 보려면 `.env`에서 `MRI_SOURCE_MANIFEST=data/mu-glioma-post-all-labeled.json`으로 바꿉니다.
+
+manifest에 없는 파일은 웹의 **NIfTI 가져오기**에서 한 `Timepoint_*` 폴더의 MRI 4개와 정답 마스크가 있으면 함께 선택하고, `MU-Glioma-Post` 프리셋으로 가져옵니다. 여러 환자나 검사 시점의 파일을 한 사례로 섞지 않습니다.
 
 웹은 파일명 마지막 토큰으로 시퀀스를 구분하며 `_`와 `-`를 모두 인식합니다. `tumorMask`, `seg`, `mask`, `segmentation`은 마스크로 인식합니다. MRI 한 개만 가져와도 단면을 볼 수 있지만 실제 모델 추론에는 **네 시퀀스 모두**가 필요합니다. `t1`, `t1ce`, `t2`, `flair` 별칭도 지원합니다. 정답 마스크가 없어도 등록한 모델로 추론할 수 있지만 정답 대비 평가 점수는 계산할 수 없습니다.
 
@@ -128,7 +132,7 @@ data/MU-Glioma-Post/PatientID_0003/Timepoint_1/
 
 ## 모델 공부와 실제 학습
 
-실제 모델 사용 시 선택 의존성을 추가합니다. CUDA를 사용할 경우 먼저 환경에 맞는 PyTorch 설치를 준비하세요. 상세 명령과 nnU-Net 학습 과정은 [docs/model-study.md](docs/model-study.md)를 참고하세요.
+실제 모델 사용 시 선택 의존성을 추가합니다. `setup.ps1 -WithML`은 PyTorch 인덱스의 CUDA 13 빌드(`cu130`, RTX 50 시리즈 포함)를 설치합니다. PyPI의 Windows PyTorch는 CPU 전용이므로 직접 설치할 때는 인덱스를 지정하세요. 상세 명령과 nnU-Net 학습 과정은 [docs/model-study.md](docs/model-study.md)를 참고하세요.
 
 ```powershell
 .\scripts\setup.ps1 -WithML
@@ -142,8 +146,10 @@ CPU 전용 PyTorch를 설치하려면 `setup.ps1 -WithML -CpuOnly`를 사용합�
 MU-Glioma-Post는 위의 **데이터 점검과 학습 목록 준비** 두 단계를 먼저 실행하고, 생성된 `data/mu-glioma-post-manifest.json`으로 학습합니다.
 
 ```powershell
-.\.venv\Scripts\python.exe -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --output runs/unet3d --epochs 100 --patch-size 64 64 64
+.\.venv\Scripts\python.exe -E -m ml.train --manifest data/mu-glioma-post-manifest.json --model unet3d --channels 32 64 128 256 320 --output runs/unet3d-32ch --epochs 200 --batch-size 2 --patch-size 160 160 160 --patches-per-case 8 --val-every 5 --amp --cosine --cache-dir runs/cache --prefetch 5 --loader-threads 4
 ```
+
+`--cache-dir`는 전처리 결과를 한 번 저장해 epoch마다 gzip을 다시 읽지 않게 하고(571개 기준 약 45 GB), `--batch-size`는 여러 사례의 패치를 섞어 한 step에 넣고, `--val-every`는 전체 볼륨 검증을 N epoch마다 실행하며, `--amp`·`--cosine`은 bfloat16 autocast와 cosine 학습률 감소를 적용합니다. 옵션 설명과 RTX 5080 측정값은 [모델 학습 가이드](docs/model-study.md)에 있습니다.
 
 다른 폴더 구조를 연결할 때는 [수동 manifest 예제](configs/manifest.example.json)를 참고할 수 있습니다. `ml.manifest` 자동 탐색은 명시적인 `--patient-regex`가 필요하고 파일 구성·환자 ID 분할을 검사하지만, 파일 내용 중복에 따른 보류 정책은 적용하지 않습니다. 점검한 MU-Glioma-Post의 학습 목록은 `prepare_mu_glioma_post.py`로 재생성하세요. 환자 ID 자체가 잘못 기록된 경우까지 자동으로 보정하지는 않습니다.
 
@@ -165,6 +171,8 @@ $env:MRI_DEVICE = "auto"
 | 환경 변수 | 기본값 / 역할 |
 | --- | --- |
 | `MRI_DATA_DIR` | 프로젝트 `.data/`; 업로드와 마스크 저장 위치 |
+| `MRI_SOURCE_MANIFEST` | `data/mu-glioma-post-manifest.json`이 있으면 자동 사용; 시작 시 연결할 실제 검사 목록, `none`이면 연결하지 않음 |
+| `MRI_DEMO_CASE` | `auto`; 실제 사례가 없을 때만 합성 데모 표시. `always`는 항상, `never`는 표시하지 않음 |
 | `MRI_DEVICE` | `auto`; `cpu`, `cuda`도 선택 가능 |
 | `MRI_UNET_CHECKPOINT` | 이 프로젝트의 3D U-Net 학습 체크포인트 |
 | `MRI_SWIN_CHECKPOINT` | 이 프로젝트의 Swin UNETR 학습 체크포인트 |
@@ -188,7 +196,8 @@ BrainMRISegmentation_3D/
 │   │   ├── store.py  # 사례·마스크 저장과 캐시
 │   │   └── volumes.py  # NIfTI 검증·단면·3D mesh·지표
 │   ├── tests/
-│   │   └── test_api.py  # API·공간 좌표·가져오기 테스트
+│   │   ├── test_api.py  # API·공간 좌표·가져오기 테스트
+│   │   └── test_linked_cases.py  # manifest 연결·RAS 읽기·데모 정책 테스트
 │   └── __init__.py
 ├── configs/
 │   └── manifest.example.json  # 다른 입력 구조를 위한 수동 manifest 예제
@@ -200,15 +209,23 @@ BrainMRISegmentation_3D/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
+│   │   │   ├── ExplainView.tsx  # 설명 보기: 요약·3D+단면 격자·시점 비교
+│   │   │   ├── ImportDialog.tsx  # NIfTI 가져오기 대화상자
 │   │   │   ├── MeshViewer.tsx  # 3D 표면·종양 분리·회전
-│   │   │   └── SliceViewer.tsx  # 축상·관상·시상 단면
+│   │   │   ├── PatientBrowser.tsx  # 환자별 검사 시점 목록·검색·필터
+│   │   │   ├── ResearchTools.tsx  # 연구 도구: 모델 실행·결과 비교·영역 표·자료
+│   │   │   ├── SliceViewer.tsx  # 축상·관상·시상 단면(외부 제어 가능)
+│   │   │   └── Timeline.tsx  # 검사 시점별 부피 막대
 │   │   ├── api.ts  # API 타입과 요청
-│   │   ├── App.tsx  # 사례 탐색·가져오기·결과 비교 UI
+│   │   ├── App.tsx  # 상태·작업 모니터링·모드 전환 셸
 │   │   ├── inferenceJob.ts  # 추론 상태 조회·재시도·요청 취소
+│   │   ├── labels.ts  # 라벨·시퀀스의 쉬운 이름
 │   │   ├── main.tsx  # React 시작점
-│   │   └── styles.css  # 화면 스타일
+│   │   ├── patients.ts  # 사례를 환자·시점으로 묶고 필터
+│   │   └── styles.css  # 소프트 UI 테마
 │   ├── tests/
-│   │   └── inferenceJob.test.mjs  # 추론 조회 회귀 테스트
+│   │   ├── inferenceJob.test.mjs  # 추론 조회 회귀 테스트
+│   │   └── patients.test.mjs  # 환자 그룹·필터 테스트
 │   ├── index.html  # 웹 HTML 진입점
 │   ├── package-lock.json  # 고정된 npm 의존성
 │   ├── package.json  # 프런트엔드 의존성·실행 명령
@@ -216,9 +233,11 @@ BrainMRISegmentation_3D/
 │   └── vite.config.ts  # 개발 프록시·빌드 설정
 ├── ml/
 │   ├── tests/
+│   │   ├── test_cache.py  # 전처리 캐시·프리페치 테스트
 │   │   └── test_data_contract.py  # 데이터·모델 계약 테스트
 │   ├── __init__.py
 │   ├── adapters.py  # 모델 등록·체크포인트 검증·추론
+│   ├── cache.py  # 전처리 결과 .npz 캐시·무효화·병렬 생성
 │   ├── data.py  # 전처리·패치·원본 격자 복원
 │   ├── export_nnunet.py  # nnU-Net 데이터셋 변환
 │   ├── manifest.py  # 파일 탐색·명시적 환자 ID 분할
@@ -276,7 +295,7 @@ BrainMRISegmentation_3D/
 └── runs/  # 테스트·검증 출력; 학습 실행 시 체크포인트도 저장
 ```
 
-`data/`는 원본 데이터와 학습 준비 결과를 보관하고, `.data/`는 웹에서 가져온 사례와 기본 합성 사례를 보관합니다. 웹 가져오기를 해야 원본이 앱 사례로 등록됩니다. `runs/`에는 현재 테스트·검증 출력이 있으며, 실제 데이터의 학습 가중치는 아직 생성하지 않았습니다.
+`data/`는 원본 데이터와 학습 준비 결과를 보관하고, `.data/`는 연결된 실제 검사의 `case.json`과 예측 마스크, 웹에서 가져온 사례, 그리고 필요할 때만 만드는 합성 사례를 보관합니다. manifest에 있는 원본은 시작 시 자동 연결되고, 그 밖의 파일은 웹 가져오기로 등록합니다. `runs/`에는 현재 테스트·검증 출력이 있으며, 실제 데이터의 학습 가중치는 아직 생성하지 않았습니다.
 
 설치·빌드·테스트 과정에서 생기는 다음 경로도 현재 로컬에 있습니다.
 
@@ -303,6 +322,8 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
+UI 문구·스타일 점검에는 프로젝트에 넣어 둔 [kill-ai-slop 스킬](.claude/skills/kill-ai-slop/SKILL.md)([원본](https://github.com/yetone/kill-ai-slop))을 사용합니다. Claude Code에서 "kill the AI slop in frontend"처럼 요청하면 `references/taxonomy.md`의 35개 기준으로 점검·보고합니다. 스캐너 스크립트는 포함하지 않았으며 문서 기준만 가져왔습니다.
+
 직접 서버를 시작하려면 프로젝트 루트에서 아래 명령을 사용합니다. `-E`는 다른 프로젝트의 `PYTHONPATH`가 이 환경에 섞이는 것을 방지합니다.
 
 ```powershell
@@ -311,11 +332,11 @@ npm --prefix frontend run build
 
 단위 테스트는 합성 사례를 사용해 입력 거절, 물리 좌표, 마스크 저장, 실제 계산된 지표 및 추론 작업 흐름을 검사합니다. 선택 ML 설치 후 `ml.smoke`로 실제 optimizer와 체크포인트 추론까지 확인할 수 있습니다. MU-Glioma-Post에서 학습한 가중치의 정확도 검증은 별도의 데이터와 실험이 필요합니다.
 
-2026-09-10 기준 백엔드·데이터 계약 테스트 **43개**가 통과했습니다. 실제 다운로드 사례의 MRI 4개와 `tumorMask`를 가져와 단면·3D mesh 응답을 확인했고, 다운로드한 마스크가 RAS로 정규화한 원본의 복셀 값·affine과 일치하는지 검증했습니다. 상세 실행 범위는 [검증 기록](docs/verification.md)에 있습니다.
+2026-09-15 기준 백엔드·데이터 계약 테스트 **49개**가 통과했습니다. 기본 manifest의 실제 검사 571개를 연결한 상태로 서버를 시작해 단면·3D mesh·지표 응답을 확인했고, 다운로드한 `Reference mask`가 RAS로 정규화한 원본의 복셀 값·affine과 일치하는지 검증했습니다. 상세 실행 범위는 [검증 기록](docs/verification.md)에 있습니다.
 
 ## 현재 범위와 다음 단계
 
-현재 3D 화면은 **마스크의 표면 mesh**를 표시합니다. 반투명 뇌 표면은 영상 intensity로 만든 위치 참고용 외피이며 정밀 뇌 조직 분할이 아닙니다. 화면 성능을 위해 표면 계산을 축소하므로 작은 영역·경계는 단면과 원본 해상도 마스크로 함께 확인하세요. 부피와 지표는 화면 mesh가 아닌 마스크 복셀에서 계산합니다.
+현재 3D 화면은 **마스크의 표면 mesh**를 표시합니다. 반투명 뇌 표면은 영상 intensity로 만든 위치 참고용 외피이며 정밀 뇌 조직 분할이 아닙니다. 한 변 256복셀 이하 격자(MU-Glioma-Post 240×240×155)는 원본 1 mm 해상도로 표면을 만들고, 어두운 복셀(뇌척수액)을 제외해 뇌 고랑이 드러나게 합니다. 더 큰 격자는 간격을 늘려 계산합니다. 부피와 지표는 화면 mesh가 아닌 마스크 복셀에서 계산합니다.
 
 비교 점수는 선택한 두 마스크의 전체 전경과 라벨별 계산입니다. 정답 없는 두 예측의 일치는 정확도를 뜻하지 않으며, 병변별 개별 평가도 수행하지 않습니다. 웹의 마스크 export는 저장된 RAS 격자를 유지합니다. CLI 추론은 입력 T1의 원래 격자로 복원합니다. 좌표와 지표의 정확한 정의는 [아키텍처 문서](docs/architecture.md)를 참고하세요.
 

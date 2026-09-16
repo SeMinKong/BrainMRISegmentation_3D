@@ -5,7 +5,9 @@
 ```mermaid
 flowchart LR
     N[3D NIfTI MRI와 선택적 정답] --> V[파일·라벨·격자 검증]
-    D[합성 데모 생성기] --> S[로컬 CaseStore]
+    M --> L[manifest 연결: 헤더 검사·RAS 격자 계산]
+    L --> S[로컬 CaseStore]
+    D[합성 데모 생성기 · 실제 사례 없을 때만] --> S
     V --> S
     S --> P[단면 PNG / 표면 mesh / 통계]
     P --> W[React + Three.js 웹]
@@ -26,15 +28,23 @@ flowchart LR
 | [backend/app/main.py](../backend/app/main.py) | 파일 업로드, REST API, 같은 origin 쓰기 검사, 모델 목록, 단일 워커 추론 큐, SPA 서빙 |
 | [backend/app/store.py](../backend/app/store.py) | 사례 ID와 메타데이터, NIfTI 파일, 분할 provenance, 192 MiB 제한의 읽기 캐시 |
 | [backend/app/volumes.py](../backend/app/volumes.py) | NIfTI 격자 검증, RAS 변환, 단면 PNG, marching cubes, 부피·Dice·HD95, 결정적 합성 데모 |
-| [frontend/src/App.tsx](../frontend/src/App.tsx) | 사례·시퀀스·마스크 선택, 업로드, 비교, 작업 상태, 모델 공부 화면 |
+| [frontend/src/App.tsx](../frontend/src/App.tsx) | 사례·모델·작업 상태, 추론 모니터링, 최신 예측 선택, 판독/예측 통계 요청 |
+| [PatientBrowser.tsx](../frontend/src/components/PatientBrowser.tsx) · [patients.ts](../frontend/src/patients.ts) | 사례를 환자·검사 시점으로 묶어 검색·필터(기본: 학습 미사용 검사) |
+| [CaseHeader.tsx](../frontend/src/components/CaseHeader.tsx) · [ResultCard.tsx](../frontend/src/components/ResultCard.tsx) | 검사 배지와 예측 실행, 전체·영역별 일치도와 부피, 한쪽에만 있는 영역의 말 표현 |
+| [ExplainView.tsx](../frontend/src/components/ExplainView.tsx) · [Timeline.tsx](../frontend/src/components/Timeline.tsx) | 판독/예측/나란히 전환, 3D+세 단면 황금비 배치, 시점별 부피 |
+| [Help.tsx](../frontend/src/components/Help.tsx) · [labels.ts](../frontend/src/labels.ts) | 용어별 `?` 설명 팝오버와 용어 모음(`GLOSSARY`), 라벨·시퀀스의 쉬운 이름 |
 | [MeshViewer.tsx](../frontend/src/components/MeshViewer.tsx) | 실제 mm 좌표의 표면 표시, 카메라, 라벨별 표시와 펼침 |
-| [SliceViewer.tsx](../frontend/src/components/SliceViewer.tsx) | 독립적인 세 단면 위치와 오버레이 요청 |
+| [SliceViewer.tsx](../frontend/src/components/SliceViewer.tsx) | 단면 위치(내부 또는 외부 제어)와 오버레이 요청, 휠·키보드 탐색 |
 | [ml/schema.py](../ml/schema.py) | 네 채널 순서, 라벨 정의, 환자 분할 누출 검사 |
 | [ml/data.py](../ml/data.py) | 모델 입력 spacing·정규화·패치 및 출력 격자 복원 |
 | [ml/train.py](../ml/train.py) | 학습·전체 validation 볼륨 추론·체크포인트와 메타데이터 저장 |
 | [ml/adapters.py](../ml/adapters.py) | 설정된 파일의 모델 레지스트리, 계약 검증, 모델별 추론 |
 
-UI는 실제 `/api` 결과를 표시합니다. 기본 데이터는 명시적으로 `demo: true`인 수학적 phantom이며, 실데이터가 없는 상태를 가짜 환자나 학습 결과로 채우지 않습니다. demo 작업은 합성 기준 마스크를 결정적으로 변형한 결과를 다시 생성합니다.
+UI는 실제 `/api` 결과를 표시합니다. 기본 데이터는 `MRI_SOURCE_MANIFEST`(기본 `data/mu-glioma-post-manifest.json`)의 실제 검사이며, `source: "linked"`로 표시됩니다. 실제 사례가 하나도 없을 때만 명시적으로 `demo: true`인 수학적 phantom을 만들며, 실데이터가 없는 상태를 가짜 환자나 학습 결과로 채우지 않습니다. demo 작업은 합성 기준 마스크를 결정적으로 변형한 결과를 다시 생성하고, 합성 사례가 목록에 없으면 `demo-phantom` 모델도 목록에서 빠집니다.
+
+### 연결된 사례
+
+`CaseStore.link_manifest`는 manifest의 각 `case_id`에 대해 원본 파일의 **헤더만** 읽어 3D·가역 affine·mm 단위·축 정렬을 검사하고, `as_closest_canonical`과 같은 RAS shape·affine을 계산해 `.data/<case_id>/case.json`에 기록합니다. MRI·마스크 파일은 복사하지 않고 경로만 내부에 보관하며 API 응답에는 경로가 나가지 않습니다. 볼륨을 읽을 때 `as_closest_canonical`을 적용하므로 LPS 원본도 저장된 RAS 사례와 같은 좌표계로 단면·mesh·지표를 계산합니다. 연결된 `reference` 마스크는 읽기 전용이고, 다운로드 시에는 RAS로 정리한 사본을 만들어 내려줍니다. 웹 추론 결과는 `.data/<case_id>/seg-pred-*.nii.gz`에 RAS로 저장되며 서버를 다시 시작해도 유지됩니다. 안전하지 않은 `case_id`, 파일 누락, 격자 불일치, 업로드 사례와의 ID 충돌은 그 검사만 건너뛰고 `/api/health`의 `source_manifest.errors`에 기록합니다.
 
 ## 데이터와 좌표 계약
 
@@ -42,7 +52,7 @@ UI는 실제 `/api` 결과를 표시합니다. 기본 데이터는 명시적으�
 
 `load_nifti`가 헤더·크기·finite 값·mm 단위·가역 affine을 먼저 검사합니다. `nib.as_closest_canonical`로 축을 RAS로 정리하며, 웹에서는 oblique/shear를 거절합니다. 정합된 입력의 축 교환·반전은 처리하지만 정합 자체를 수행하지는 않습니다. 다중 시퀀스와 마스크의 canonical shape·affine이 일치해야 사례를 저장합니다.
 
-저장된 사례는 `.data/<case_id>/case.json`, `<modality>.nii.gz`, `seg-<segmentation_id>.nii.gz`로 구성됩니다. 메타데이터의 공간 단위는 mm, 방향은 RAS입니다. 다운로드하는 웹 마스크는 이 저장된 RAS 격자와 affine을 유지하며 업로드 파일의 원래 배열 축 순서까지 복원하지는 않습니다. 세계 좌표상의 정합은 유지합니다.
+업로드한 사례는 `.data/<case_id>/case.json`, `<modality>.nii.gz`, `seg-<segmentation_id>.nii.gz`로 구성됩니다. 연결된 사례는 `case.json`과 예측 `seg-*.nii.gz`만 두고 MRI·기준 마스크는 원본 경로를 참조합니다. 메타데이터의 공간 단위는 mm, 방향은 RAS입니다. 다운로드하는 웹 마스크는 이 저장된 RAS 격자와 affine을 유지하며 업로드 파일의 원래 배열 축 순서까지 복원하지는 않습니다. 세계 좌표상의 정합은 유지합니다.
 
 ### 모델 입력과 출력
 
@@ -54,9 +64,13 @@ CLI 추론 출력은 입력 T1의 shape·affine으로 최근접 복원합니다.
 
 ## 시각화와 수치 계산
 
-- **단면:** RAS 배열의 axial/coronal/sagittal 단면을 방사선학적 방향으로 표시합니다. 복셀 간격으로 종횡비를 조정하고 긴 변 512 px의 PNG로 반환합니다. 각 단면의 위치는 독립적이며 연결 crosshair는 없습니다.
-- **뇌 표면:** intensity 임계값과 큰 연결 성분으로 위치 참고용 외피를 만듭니다. 뇌 조직별 분할 결과는 아닙니다.
-- **분할 표면:** 라벨별 이진 마스크에 marching cubes를 적용하고 full affine으로 vertex를 mm 좌표에 옮깁니다. 가장 긴 축이 약 128 복셀을 넘지 않도록 stride를 적용해 렌더링 부담을 줄입니다. 지나치게 복잡한 표면은 생성을 생략할 수 있습니다.
+- **단면:** 웹은 `GET /api/cases/{id}/volumes/{modality}`로 시퀀스 전체를 0–255 uint8(0.5–99.5 백분위 윈도우, RAS, C 순서)로 한 번 받고, 마스크도 `/segmentations/{id}/volume`으로 받아 **브라우저 캔버스에서 단면을 그립니다**(`frontend/src/volumes.ts`의 `drawSlice`). 방향은 서버 `_slice`와 같은 방사선학적 배치(환자 오른쪽이 화면 왼쪽)이며, 복셀 간격으로 종횡비를 맞춥니다. 휠·슬라이더·화살표 키가 다음 프레임에 반영되고 페이지는 스크롤되지 않습니다. 서버의 PNG 단면 API는 검증·외부 도구용으로 유지합니다.
+- **뇌 표면:** 양의 intensity 중 하위 22 %(주로 뇌척수액)를 제외한 조직 마스크에서 가장 큰 연결 성분을 취하고, 작은 구멍만 메운 뒤 가우시안 블러(σ 1.0)와 marching cubes로 표면을 만듭니다. 그래서 뇌 고랑이 표면에 드러납니다. 뇌 조직별 분할 결과는 아닙니다.
+- **분할 표면:** 라벨별 이진 마스크에 marching cubes를 적용하고 full affine으로 vertex를 mm 좌표에 옮깁니다. 한 변 256 복셀 이하 격자는 stride 1(원본 해상도)로 계산하고 그보다 크면 stride를 늘립니다. 1 mm 뇌 표면은 약 37만 면, JSON 13 MB이며 서버에서 직렬화·gzip 결과를 사례·마스크 파일별로 캐시해(첫 생성 약 1.7초, 이후 수십 ms) 두 3D 뷰어가 같은 응답을 공유합니다. 지나치게 복잡한 표면은 생성을 생략할 수 있습니다.
+- **종양 분리 보기:** 3D 모형 아래 `뇌 + 종양` / `종양만 분리` 토글로 뇌 표면을 숨기고 종양에 자동 확대하며, `영역 펼쳐 보기`로 라벨별 표면을 떼어 볼 수 있습니다.
+- **3D 카메라 공유:** `frontend/src/cameraSync.ts`가 사례별로 카메라(위치·시선점·up)를 모듈 수준에 보관합니다. 모든 `MeshViewer`는 자기 움직임을 발행하고 같은 사례의 다른 뷰어 움직임을 따라가므로, 판독/예측 탭을 바꿔도 시점이 유지되고 나란히 비교의 두 3D는 함께 회전·확대됩니다. 새 장면은 저장된 카메라가 있으면 그것을 쓰고 없을 때만 초기 시점을 잡습니다. 자동 회전도 같은 저장소의 단일 루프가 공유 카메라를 돌리는 방식이라 뷰어가 여러 개여도 한 번만 돌고, 드래그 중에는 멈춥니다.
+- **3D 보조 표시:** 영역에 마우스를 올리면 밝아지며 이름·부피 툴팁이 뜨고, `영역 펼쳐 보기`는 종양 중심에서 바깥으로 라벨별 표면을 애니메이션으로 벌린 뒤 각 조각 위에 이름·부피 라벨을 띄웁니다. 오른쪽 아래 나침반은 R/L·A/P·S/I 방향을 카메라에 맞춰 회전해 뇌 표면을 숨긴 종양만 보기에서도 방향을 알 수 있게 합니다.
+- **설명 화면 배치:** CSS grid 두 열 `minmax(0,1fr) minmax(260px, min(38.2%, 430px))`로 황금비를 잡습니다. 왼쪽 열은 요약 → 3D(`flex: 1`) → 시점 변화, 오른쪽 열은 세로 툴바 → 축상 → 관상 → 시상입니다. 각 단면 틀은 사례 헤더(shape·spacing)에서 계산한 물리 비율을 `aspect-ratio`로 갖기 때문에 볼륨이 도착하기 전에도 레이아웃이 흔들리지 않고, 정사각형 틀에 넣을 때 생기던 위아래 빈 띠가 없습니다. 3D 카드가 늘어나 두 열의 높이를 맞추므로 어느 열도 먼저 끝나지 않습니다. 1000 px 이하에서는 한 열로 쌓입니다.
 - **종양 분리:** 뇌 표면을 숨기고 라벨 mesh만 남깁니다. 펼침은 라벨 mesh의 표시 위치만 이동합니다. 복셀이나 파일을 변경하지 않습니다.
 - **부피:** `라벨 복셀 수 × abs(det(affine[:3,:3])) / 1000`으로 mL를 계산합니다. 전체 부피는 `mask > 0`의 부피이며 RC 등을 포함할 수 있습니다. mesh 축소·표시 토글과 무관합니다.
 - **연결 성분:** SciPy 기본 3D 연결 기준인 면을 공유하는 6방향 연결로 센 라벨별 성분 수입니다. 병변별 진단·추적 ID는 아닙니다.
@@ -81,10 +95,12 @@ CLI 추론 출력은 입력 T1의 shape·affine으로 최근접 복원합니다.
 | POST | `/api/cases/import` | multipart `files`, `name`, `label_preset`으로 사례 업로드 |
 | GET | `/api/cases/{case_id}` | 사례 격자·시퀀스·분할 목록 |
 | GET | `/api/cases/{case_id}/slices/{plane}/{index}` | 0부터 시작하는 단면 PNG, 시퀀스·라벨·불투명도·윈도우 선택 |
-| GET | `/api/cases/{case_id}/mesh` | 뇌 외피와 라벨별 vertex/face 배열 |
+| GET | `/api/cases/{case_id}/mesh` | 뇌 외피와 라벨별 vertex/face 배열 (gzip·캐시) |
+| GET | `/api/cases/{case_id}/volumes/{modality}` | 시퀀스 전체 uint8 볼륨; `X-Shape`, `X-Spacing`, `X-Window` 헤더 |
+| GET | `/api/cases/{case_id}/segmentations/{segmentation_id}/volume` | 마스크 전체 uint8 볼륨 |
 | GET | `/api/cases/{case_id}/stats` | 복셀 부피, 연결 성분, 선택적 비교 지표 |
 | GET | `/api/cases/{case_id}/segmentations/{segmentation_id}/download` | 선택한 NIfTI 마스크 |
-| GET | `/api/models` | 모델별 의존성·설정 상태와 미연결 사유 |
+| GET | `/api/models` | 모델별 의존성·설정 상태와 미연결 사유; 연결된 프로젝트 체크포인트는 `training`(검증 평균 Dice, 검증 epoch, 학습/검증 사례 수)을 포함 |
 | POST | `/api/jobs` | `{case_id, model_id}`로 추론 요청 |
 | GET | `/api/jobs` | 현재 프로세스의 작업 기록 |
 | GET | `/api/jobs/{job_id}` | 작업 상태와 결과 segmentation ID |
