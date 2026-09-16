@@ -29,6 +29,10 @@ const readSettings = (): Remembered => {
   }
 };
 const remembered = readSettings();
+// Deep links: ?case=<id>&view=diff opens one visit directly (for sharing a finding or taking screenshots).
+const link = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+const linkedCase = link.get("case") || "";
+const linkedView = (["reference", "prediction", "diff", "both"] as Shown[]).find((v) => v === link.get("view"));
 
 const defaultView = (data?: Case): ViewState => ({
   modality: remembered.modality && data?.modalities.includes(remembered.modality) ? remembered.modality
@@ -51,10 +55,10 @@ const defaultFilter = (hasSplits: boolean): PatientFilter => ({ query: "", split
 export default function App() {
   const [cases, setCases] = useState<Case[]>([]);
   const [caseId, setCaseId] = useState("");
-  const [screen, setScreen] = useState<Screen>("overview");
+  const [screen, setScreen] = useState<Screen>(linkedCase ? "case" : "overview");
   const [models, setModels] = useState<Model[]>([]);
   const [modelId, setModelId] = useState("");
-  const [shown, setShown] = useState<Shown>(remembered.shown && remembered.shown !== "both" ? remembered.shown : "reference");
+  const [shown, setShown] = useState<Shown>(linkedView ?? (remembered.shown && remembered.shown !== "both" ? remembered.shown : "reference"));
   const [view, setView] = useState<ViewState>(defaultView());
   const [filter, setFilter] = useState<PatientFilter>(defaultFilter(true));
   const [referenceStats, setReferenceStats] = useState<Stats | null>(null);
@@ -153,7 +157,8 @@ export default function App() {
       setJobConnection(null);
       // Start on a case the model has not trained on, so the first result shown is a fair one.
       const unseen = c.cases.find((x) => x.study?.split === "val");
-      setCaseId(running?.case_id || unseen?.id || c.cases[0]?.id || "");
+      const linked = c.cases.some((x) => x.id === linkedCase) ? linkedCase : "";
+      setCaseId(linked || running?.case_id || unseen?.id || c.cases[0]?.id || "");
       const trained = running?.model_id || m.models.find((x) => x.available && !x.demo_only)?.id || m.models.find((x) => !x.demo_only)?.id || m.models[0]?.id || "";
       setModelId(trained);
       void loadOverview(trained, controller.signal);
