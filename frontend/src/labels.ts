@@ -62,6 +62,30 @@ export const GLOSSARY: Record<string, { title: string; text: string }> = {
   snfh: { title: "주변 신호 변화 (SNFH)", text: "종양 주변의 부종이나 신호가 달라진 조직입니다. FLAIR에서 밝게 보이며 대개 범위가 넓습니다." },
   et: { title: "조영증강 종양 (ET)", text: "조영제로 밝게 보이는 활성 종양입니다. T1 조영 영상에서 가장 잘 구별됩니다." },
   rc: { title: "절제강 (RC)", text: "수술로 종양을 제거한 뒤 남은 빈 공간입니다. 종양이 아니지만 치료 후 영상에서 함께 표시합니다." },
+  diff: {
+    title: "차이 보기",
+    text: "판독 마스크와 모델 예측을 겹쳐 놓고 다른 곳만 색으로 보여 줍니다. 회색은 둘이 일치한 부위, 파란색은 판독에는 있는데 모델이 놓친 부위, 빨간색은 모델이 판독보다 더 그린 부위입니다.",
+  },
+  missed: {
+    title: "놓친 부피",
+    text: "판독 마스크에는 종양으로 표시되어 있는데 모델이 종양이 아니라고 한 부분의 크기(mL)입니다. 차이 보기에서 파란색으로 나타납니다.",
+  },
+  extra: {
+    title: "더 그린 부피",
+    text: "모델은 종양이라고 했지만 판독 마스크에는 없는 부분의 크기(mL)입니다. 차이 보기에서 빨간색으로 나타납니다.",
+  },
+  overview: {
+    title: "모델 성능 개요",
+    text: "학습에 쓰지 않은 검사 전체에 모델을 돌려 얻은 일치도의 평균과 분포입니다. 큰 숫자는 종양 전체를 한 덩어리로 본 일치도라 높게 나오고, 학습 중 측정값은 네 영역 각각의 일치도를 평균한 값이라 더 낮습니다. 한 검사의 점수보다 전체 분포가 모델의 실제 실력을 더 잘 보여 줍니다.",
+  },
+  percentile: {
+    title: "상위 몇 %",
+    text: "이 검사의 일치도가 검증 검사들 가운데 어디쯤인지 나타냅니다. 상위 20 %라면 다섯 검사 중 한 번 나올 만큼 잘 맞은 경우입니다.",
+  },
+  crosshair: {
+    title: "연결된 단면",
+    text: "한 단면을 클릭하면 그 지점을 지나는 나머지 두 단면으로 함께 이동하고, 십자선이 같은 위치를 가리킵니다.",
+  },
   model: {
     title: "내 모델 (3D U-Net)",
     text: "MRI 네 장을 입력받아 각 점이 어느 영역인지 맞히도록 학습한 신경망입니다. 학습에 쓴 435개 검사로 배우고, 쓰지 않은 136개 검사로 성능을 측정했습니다.",
@@ -69,3 +93,10 @@ export const GLOSSARY: Record<string, { title: string; text: string }> = {
 };
 
 export const labelTerm: Record<number, string> = { 1: "netc", 2: "snfh", 3: "et", 4: "rc" };
+
+/** Colours and names for the difference view: where the model and the expert disagree. */
+export const DIFF = {
+  overlap: { color: "#9aa4ae", name: "둘 다 표시 (일치)" },
+  missed: { color: "#3b82f6", name: "모델이 놓친 부위" },
+  extra: { color: "#ef4444", name: "모델이 더 그린 부위" },
+} as const;

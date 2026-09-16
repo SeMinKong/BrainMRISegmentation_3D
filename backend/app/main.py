@@ -22,7 +22,8 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from .store import DEMO_POLICIES, CaseStore, utc_now
-from .volumes import LABEL_PRESETS, load_nifti, make_mesh, make_phantom, modality_from_name, read_canonical, slice_png, stats, windowed_uint8
+from .volumes import (LABEL_PRESETS, _mesh, difference_masks, load_nifti, make_mesh, make_phantom, modality_from_name, read_canonical,
+                      slice_png, stats, windowed_uint8)
 
 # Windows registry MIME associations can label JavaScript as text/plain.
 # ES module scripts require an explicit JavaScript type with nosniff enabled.
@@ -42,6 +43,16 @@ DEMO_MODEL = {"id": "demo-phantom", "name": "합성 데모 파이프라인", "av
 class JobRequest(BaseModel):
     case_id: str = Field(min_length=1, max_length=80)
     model_id: str = Field(min_length=1, max_length=80)
+
+
+class BatchRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=80)
+    case_ids: list[str] = Field(min_length=1, max_length=1000)
+    skip_predicted: bool = True
+
+
+MAX_QUEUE = 1000  # a whole validation split can wait in the single-worker queue
+MAX_JOB_HISTORY = 2000
 
 
 def model_catalog() -> list[dict]:
@@ -92,7 +103,13 @@ def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | s
         instance.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mri-inference")
         instance.state.processing = threading.BoundedSemaphore(2)
         instance.state.mesh_cache = {}
+        # Reference volumes for list sorting fill in the background (~0.15 s per case); the API works meanwhile.
+        instance.state.warmup_stop = threading.Event()
+        instance.state.warmup = threading.Thread(target=instance.state.store.warm_reference_summaries,
+                                                 args=(instance.state.warmup_stop,), name="reference-summaries", daemon=True)
+        instance.state.warmup.start()
         yield
+        instance.state.warmup_stop.set()
         instance.state.executor.shutdown(wait=True)
 
     api = FastAPI(title="NeuroScope · local 3D MRI study workspace", version="0.1.0", lifespan=lifespan)
@@ -142,6 +159,13 @@ def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | s
     @api.get("/api/cases/{case_id}")
     def case_detail(case_id: str, request: Request):
         return request.app.state.store.get(case_id)
+
+    @api.get("/api/cases/{case_id}/reference-summary")
+    def reference_summary(case_id: str, request: Request):
+        summary = request.app.state.store.reference_summary(case_id)
+        if summary is None:
+            raise HTTPException(404, "This case has no reference mask.")
+        return summary
 
     @api.post("/api/cases/import", status_code=201)
     def import_case(request: Request, files: list[UploadFile] = File(...), name: str = Form("Imported MRI"),
@@ -286,6 +310,43 @@ def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | s
     def models(request: Request):
         return {"models": offered_models(request.app.state)}
 
+    def comparison_metrics(state, case_id: str, seg_id: str) -> dict:
+        """Compact per-prediction summary stored on the segmentation: whole-foreground Dice, per-label Dice/volumes."""
+        case = state.store.get(case_id)
+        with state.processing:
+            prediction = state.store.read_segmentation(case_id, seg_id)
+            reference = state.store.read_segmentation(case_id, "reference")
+            result = stats(prediction, np.asarray(case["affine"]), reference, case["labels"])
+        return {"dice": result.get("dice"), "hd95_mm": result.get("hd95_mm"), "missed_ml": result.get("missed_ml"),
+                "extra_ml": result.get("extra_ml"), "prediction_volume_ml": result["total_volume_ml"],
+                "reference_volume_ml": result.get("reference_volume_ml"),
+                "labels": {str(r["label"]): {"dice": r.get("dice"), "volume_ml": r["volume_ml"], "missed_ml": r.get("missed_ml"),
+                                             "extra_ml": r.get("extra_ml"), "reference_volume_ml": r.get("reference_volume_ml")}
+                           for r in result["regions"]}}
+
+    def eligible(case: dict, model: dict) -> str | None:
+        """Why a model cannot run on a case, or None when it can."""
+        if model["id"] == "demo-phantom":
+            return None if case["demo"] else "The demo pipeline is restricted to the synthetic phantom. Configure a trained model for uploaded MRI."
+        if case["demo"]:
+            return "Trained models are not applied to the synthetic phantom."
+        if not {"t1n", "t1c", "t2w", "t2f"} <= set(case["modalities"]):
+            return "Configured models require four modalities: T1n, T1c, T2w, T2f."
+        if case["label_preset"] != "mu_glioma_post":
+            return "Built-in model adapters use MU-Glioma-Post labels. Import the matching preset or implement an explicit mapping."
+        return None
+
+    def enqueue(state, case_id: str, model_id: str) -> dict:
+        job_id = uuid4().hex[:16]
+        job = {"id": job_id, "case_id": case_id, "model_id": model_id, "status": "queued", "progress": 0,
+               "message": "Queued for local inference", "created_at": utc_now(), "elapsed_seconds": 0, "segmentation_id": None}
+        if len(state.jobs) >= MAX_JOB_HISTORY:
+            for key in [k for k, j in state.jobs.items() if j["status"] in ("completed", "failed")][: len(state.jobs) - MAX_JOB_HISTORY + 1]:
+                del state.jobs[key]
+        state.jobs[job_id] = job
+        state.executor.submit(perform_job, state, job_id, JobRequest(case_id=case_id, model_id=model_id))
+        return dict(job)
+
     def perform_job(state, job_id: str, body: JobRequest):
         started = time.monotonic()
         def update(progress: float, message: str):
@@ -318,6 +379,9 @@ def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | s
                 kind, title = "prediction", next(item["name"] for item in model_catalog() if item["id"] == body.model_id)
                 provenance = {key: metadata[key] for key in ("model_id", "device", "labels", "spacing_mm", "training_step", "output_grid") if key in metadata}
             state.store.add_segmentation(body.case_id, seg_id, title, kind, image, provenance=provenance)
+            if any(segment["id"] == "reference" for segment in case["segmentations"]):
+                update(.95, "Comparing with the reference mask")
+                state.store.record_metrics(body.case_id, seg_id, comparison_metrics(state, body.case_id, seg_id))
             with state.jobs_lock:
                 state.jobs[job_id].update(status="completed", progress=100, message="Segmentation is ready", segmentation_id=seg_id,
                                           elapsed_seconds=round(time.monotonic() - started, 2))
@@ -338,27 +402,110 @@ def create_app(data_dir: Path | None = None, *, source_manifest: Path | None | s
             raise HTTPException(404, "Unknown model.")
         if not model["available"]:
             raise HTTPException(409, model["reason"])
-        if body.model_id == "demo-phantom" and not case["demo"]:
-            raise HTTPException(422, "The demo pipeline is restricted to the synthetic phantom. Configure a trained model for uploaded MRI.")
-        if body.model_id != "demo-phantom" and not {"t1n", "t1c", "t2w", "t2f"} <= set(case["modalities"]):
-            raise HTTPException(422, "Configured models require four modalities: T1n, T1c, T2w, T2f.")
-        if body.model_id != "demo-phantom" and case["label_preset"] != "mu_glioma_post":
-            raise HTTPException(422, "Built-in model adapters use MU-Glioma-Post labels. Import the matching preset or implement an explicit mapping.")
+        reason = eligible(case, model)
+        if reason:
+            raise HTTPException(422, reason)
         with state.jobs_lock:
-            if sum(job["status"] in ("queued", "running") for job in state.jobs.values()) >= 4:
-                raise HTTPException(429, "The local inference queue is full (maximum four jobs).")
-            if len(state.jobs) >= 100:
-                for key in list(state.jobs):
-                    if state.jobs[key]["status"] in ("completed", "failed"):
-                        del state.jobs[key]
-                        break
-            job_id = uuid4().hex[:16]
-            job = {"id": job_id, "case_id": body.case_id, "model_id": body.model_id, "status": "queued", "progress": 0,
-                   "message": "Queued for local inference", "created_at": utc_now(), "elapsed_seconds": 0, "segmentation_id": None}
-            state.jobs[job_id] = job
-            snapshot = dict(job)
-            state.executor.submit(perform_job, state, job_id, body)
-            return snapshot
+            if sum(job["status"] in ("queued", "running") for job in state.jobs.values()) >= MAX_QUEUE:
+                raise HTTPException(429, "The local inference queue is full.")
+            return enqueue(state, body.case_id, body.model_id)
+
+    @api.post("/api/jobs/batch", status_code=202)
+    def start_batch(body: BatchRequest, request: Request):
+        """Queue one job per case (single worker, sequential). Cases the model cannot run on are reported, not queued."""
+        state = request.app.state
+        model = next((item for item in offered_models(state) if item["id"] == body.model_id), None)
+        if model is None:
+            raise HTTPException(404, "Unknown model.")
+        if not model["available"]:
+            raise HTTPException(409, model["reason"])
+        queued, skipped = [], []
+        with state.jobs_lock:
+            pending = {job["case_id"] for job in state.jobs.values() if job["status"] in ("queued", "running")}
+            for case_id in dict.fromkeys(body.case_ids):
+                try:
+                    case = state.store.get(case_id)
+                except KeyError:
+                    skipped.append({"case_id": case_id, "reason": "Case not found"})
+                    continue
+                reason = eligible(case, model)
+                if reason:
+                    skipped.append({"case_id": case_id, "reason": reason})
+                elif case_id in pending:
+                    skipped.append({"case_id": case_id, "reason": "Already queued"})
+                elif body.skip_predicted and any(s.get("provenance", {}).get("model_id") == body.model_id for s in case["segmentations"]):
+                    skipped.append({"case_id": case_id, "reason": "Already predicted by this model"})
+                elif len(pending) + len(queued) >= MAX_QUEUE:
+                    skipped.append({"case_id": case_id, "reason": "Queue full"})
+                else:
+                    queued.append(enqueue(state, case_id, body.model_id))
+        return {"queued": len(queued), "skipped": skipped, "jobs": queued}
+
+    @api.get("/api/overview")
+    def overview(request: Request, model_id: str = "unet3d", split: str | None = "val"):
+        """Model performance over every case that has a prediction by `model_id` (metrics stored at prediction time)."""
+        state = request.app.state
+        rows = []
+        for case in state.store.list():
+            if split and case.get("study", {}).get("split") != split:
+                continue
+            latest = next((s for s in reversed(case["segmentations"]) if s.get("provenance", {}).get("model_id") == model_id), None)
+            if latest is None:
+                continue
+            metrics = latest.get("metrics")
+            if metrics is None and any(s["id"] == "reference" for s in case["segmentations"]):
+                metrics = comparison_metrics(state, case["id"], latest["id"])  # predictions made before metrics were stored
+                state.store.record_metrics(case["id"], latest["id"], metrics)
+            rows.append({"case_id": case["id"], "name": case["name"], "study": case.get("study"), "segmentation_id": latest["id"],
+                         "created_at": latest.get("created_at"), **(metrics or {})})
+        scored = [r["dice"] for r in rows if r.get("dice") is not None]
+        labels = {}
+        for label in ("1", "2", "3", "4"):
+            # Mean over cases where the reference contains the label (absent-label cases would otherwise count as perfect 1.0).
+            values = [r["labels"][label]["dice"] for r in rows if r.get("labels") and r["labels"].get(label, {}).get("dice") is not None
+                      and (r["labels"][label].get("reference_volume_ml") or 0) > 0]
+            labels[label] = {"mean": float(np.mean(values)) if values else None, "count": len(values)}
+        edges = [0, .2, .4, .5, .6, .7, .8, .9, 1.0001]
+        histogram = [{"from": edges[i], "to": min(edges[i + 1], 1.0), "count": int(sum(edges[i] <= d < edges[i + 1] for d in scored))}
+                     for i in range(len(edges) - 1)]
+        with state.jobs_lock:
+            pending = sum(job["status"] in ("queued", "running") and job["model_id"] == model_id for job in state.jobs.values())
+        candidates = [c for c in state.store.list() if (not split or c.get("study", {}).get("split") == split)
+                      and any(s["id"] == "reference" for s in c["segmentations"]) and not c["demo"]]
+        # Two averages: whole-tumour Dice (all regions merged, what a viewer sees) and the mean of the four per-label
+        # means (the number training reports as validation Dice), so the two are never confused.
+        label_means = [entry["mean"] for entry in labels.values() if entry["mean"] is not None]
+        return {"model_id": model_id, "split": split, "predicted": len(rows), "candidates": len(candidates), "pending_jobs": pending,
+                "summary": {"mean_dice": float(np.mean(scored)) if scored else None, "median_dice": float(np.median(scored)) if scored else None,
+                            "mean_label_dice": float(np.mean(label_means)) if label_means else None,
+                            "labels": labels, "histogram": histogram},
+                "cases": sorted(rows, key=lambda r: (r.get("dice") is None, r.get("dice") if r.get("dice") is not None else 0))}
+
+    @api.get("/api/cases/{case_id}/diff-mesh")
+    def diff_mesh(case_id: str, request: Request, prediction: str, reference: str = "reference"):
+        """Surfaces of the voxels the model missed (reference only) and added (prediction only), in mm."""
+        state = request.app.state
+        case = state.store.get(case_id)
+        key = ("diff", case_id, prediction, reference, state.store.segmentation_path(case_id, prediction).stat().st_mtime_ns)
+        with state.processing:
+            cached = state.mesh_cache.get(key)
+            if cached is None:
+                predicted = state.store.read_segmentation(case_id, prediction)
+                expected = state.store.read_segmentation(case_id, reference)
+                missed, extra = difference_masks(predicted, expected)
+                affine = np.asarray(case["affine"])
+                stride = max(1, int(np.ceil(max(predicted.shape) / 256)))
+                small_affine = affine.copy()
+                small_affine[:3, :3] *= stride
+                center = nib.affines.apply_affine(affine, (np.array(predicted.shape) - 1) / 2)
+                payload = {"missed": _mesh(missed[::stride, ::stride, ::stride], small_affine),
+                           "extra": _mesh(extra[::stride, ::stride, ::stride], small_affine), "center": center.tolist(), "units": "mm"}
+                cached = gzip.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), compresslevel=5)
+                if len(state.mesh_cache) >= 12:
+                    state.mesh_cache.pop(next(iter(state.mesh_cache)))
+                state.mesh_cache[key] = cached
+        return Response(cached, media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding", "Cache-Control": "private, max-age=300"})
 
     @api.get("/api/jobs")
     def list_jobs(request: Request):

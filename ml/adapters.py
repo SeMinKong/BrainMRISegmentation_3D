@@ -117,6 +117,35 @@ def validate_metadata(metadata: dict, model_id: str) -> dict:
     return labels
 
 
+_model_cache: dict[tuple, tuple] = {}
+
+
+def _load_model(model_id: str, checkpoint_path: Path, device):
+    """Validated model kept on the device between jobs; reloaded only when the checkpoint file changes.
+
+    Batch prediction over a validation set runs ~140 jobs back to back; re-reading 50 MB and rebuilding
+    the network each time cost about 1.5 s per case.
+    """
+    import torch
+    from .models import build_model
+
+    key = (model_id, str(checkpoint_path.resolve()), checkpoint_path.stat().st_mtime_ns, str(device))
+    cached = _model_cache.get(key)
+    if cached is not None:
+        return cached
+    # Tensor-only deserialization; never enable arbitrary-pickle fallback here.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    metadata = checkpoint.get("metadata", {})
+    labels = validate_metadata(metadata, model_id)
+    require_mu_glioma_post_labels(labels)
+    model = build_model(model_id, len(labels), metadata.get("model_settings"))
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    model.to(device).eval()
+    _model_cache.clear()  # one resident model is enough for a local single-GPU tool
+    _model_cache[key] = (model, metadata, labels)
+    return _model_cache[key]
+
+
 def run_inference(model_id: str, modalities: Mapping[str, Path], output_path: Path,
                   progress: Callable[[float, str], None] | None = None) -> dict:
     report = progress or (lambda percent, message: None)
@@ -135,15 +164,8 @@ def run_inference(model_id: str, modalities: Mapping[str, Path], output_path: Pa
 
     checkpoint_path = Path(os.environ[MODEL_INFO[model_id][1]])
     report(0.05, "Loading registered checkpoint")
-    # Tensor-only deserialization; never enable arbitrary-pickle fallback here.
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    metadata = checkpoint.get("metadata", {})
-    labels = validate_metadata(metadata, model_id)
-    require_mu_glioma_post_labels(labels)
-    model = build_model(model_id, len(labels), metadata.get("model_settings"))
-    model.load_state_dict(checkpoint["state_dict"], strict=True)
     device = _device(torch)
-    model.to(device).eval()
+    model, metadata, labels = _load_model(model_id, checkpoint_path, device)
     report(0.18, "Canonical RAS orientation, spacing and intensity normalization")
     image, _, affine, original = prepare_case(paths, tuple(metadata["spacing_mm"]))
     tensor = torch.from_numpy(image[None])

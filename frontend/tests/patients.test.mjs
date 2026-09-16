@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterPatients, findPatient, groupPatients, hasPrediction, patientName } from "../src/patients.ts";
+import { caseDice, caseVolume, filterPatients, findPatient, groupPatients, hasCavity, hasPrediction, patientName, visibleCaseIds } from "../src/patients.ts";
 
 const linked = (patient, timepoint, split = "train", segmentations = [{ id: "reference", name: "Reference mask", kind: "reference" }]) => ({
   id: `PatientID_${patient}_Timepoint_${timepoint}`,
@@ -34,7 +34,7 @@ test("cases are grouped per patient with timepoints in numeric order", () => {
 test("filters by split, prediction presence and free text", () => {
   const predicted = linked("0020", 1, "train", [{ id: "reference", kind: "reference", name: "r" }, { id: "pred-1", kind: "prediction", name: "3D U-Net" }]);
   const patients = groupPatients([linked("0003", 1, "val"), linked("0003", 2, "val"), linked("0010", 1), predicted]);
-  const base = { query: "", split: "all", predictedOnly: false };
+  const base = { query: "", split: "all", predictedOnly: false, withCavity: false, sort: "id" };
   assert.deepEqual(filterPatients(patients, { ...base, split: "val" }).map((p) => p.id), ["PatientID_0003"]);
   assert.deepEqual(filterPatients(patients, { ...base, predictedOnly: true }).map((p) => p.id), ["PatientID_0020"]);
   assert.deepEqual(filterPatients(patients, { ...base, query: "10" }).map((p) => p.id), ["PatientID_0010"]);
@@ -45,4 +45,26 @@ test("filters by split, prediction presence and free text", () => {
   assert.equal(hasPrediction(linked("0003", 1)), false);
   assert.equal(findPatient(patients, "PatientID_0010_Timepoint_1")?.id, "PatientID_0010");
   assert.equal(findPatient(patients, "missing"), undefined);
+});
+
+test("list doubles as a worklist: lowest Dice first, largest tumour first, cavity filter", () => {
+  const scored = (patient, timepoint, dice, volume, rc = 0) => ({
+    ...linked(patient, timepoint, "val", [
+      { id: "reference", kind: "reference", name: "r" },
+      { id: "pred-1", kind: "prediction", name: "3D U-Net", provenance: { model_id: "unet3d" }, metrics: { dice, reference_volume_ml: volume, labels: { 4: { volume_ml: 0, reference_volume_ml: rc } } } },
+    ]),
+    reference_summary: { volumes_ml: { 1: 0, 2: volume - rc, 3: 0, 4: rc }, total_volume_ml: volume },
+  });
+  const unscored = linked("0050", 1, "val");
+  const patients = groupPatients([scored("0001", 1, 0.9, 20), scored("0002", 1, 0.4, 80, 5), scored("0002", 2, 0.6, 60, 5), scored("0003", 1, 0.7, 5), unscored]);
+  const base = { query: "", split: "all", predictedOnly: false, withCavity: false, sort: "id" };
+  assert.deepEqual(filterPatients(patients, { ...base, sort: "dice" }).map((p) => p.id), ["PatientID_0002", "PatientID_0003", "PatientID_0001", "PatientID_0050"], "unscored last");
+  assert.deepEqual(filterPatients(patients, { ...base, sort: "dice" })[0].timepoints.map((t) => t.index), [1, 2], "worst visit first inside the patient");
+  assert.deepEqual(filterPatients(patients, { ...base, sort: "volume" }).map((p) => p.id), ["PatientID_0002", "PatientID_0001", "PatientID_0003", "PatientID_0050"]);
+  assert.deepEqual(filterPatients(patients, { ...base, withCavity: true }).map((p) => p.id), ["PatientID_0002"]);
+  assert.deepEqual(visibleCaseIds(filterPatients(patients, { ...base, sort: "dice" })).slice(0, 3),
+    ["PatientID_0002_Timepoint_1", "PatientID_0002_Timepoint_2", "PatientID_0003_Timepoint_1"]);
+  assert.equal(caseDice(unscored), null);
+  assert.equal(caseVolume(scored("0009", 1, 0.5, 33)), 33);
+  assert.equal(hasCavity(unscored), null);
 });

@@ -321,7 +321,12 @@ def stats(mask: np.ndarray, affine: np.ndarray, reference: np.ndarray | None = N
                  "voxels": int(binary.sum()), "volume_ml": float(binary.sum() * voxel_ml),
                  "components": int(ndimage.label(binary)[1])}
         if reference is not None:
-            entry.update(mask_metrics(binary, reference == label["id"], affine))
+            expected = reference == label["id"]
+            entry.update(mask_metrics(binary, expected, affine))
+            # Volumes the model left out (in reference only) and added (in prediction only) — plainer than Dice.
+            entry["missed_ml"] = float(np.count_nonzero(expected & ~binary) * voxel_ml)
+            entry["extra_ml"] = float(np.count_nonzero(binary & ~expected) * voxel_ml)
+            entry["reference_volume_ml"] = float(np.count_nonzero(expected) * voxel_ml)
         regions.append(entry)
     output = {"regions": regions, "total_volume_ml": float(np.count_nonzero(mask) * voxel_ml),
               "voxel_volume_mm3": voxel_ml * 1000, "dice": None, "hd95_mm": None,
@@ -336,4 +341,21 @@ def stats(mask: np.ndarray, affine: np.ndarray, reference: np.ndarray | None = N
         output["tumor_bbox_voxel"] = None
     if reference is not None:
         output.update(mask_metrics(mask > 0, reference > 0, affine))
+        output["missed_ml"] = float(np.count_nonzero((reference > 0) & ~foreground) * voxel_ml)
+        output["extra_ml"] = float(np.count_nonzero(foreground & ~(reference > 0)) * voxel_ml)
+        output["reference_volume_ml"] = float(np.count_nonzero(reference) * voxel_ml)
     return output
+
+
+def difference_masks(prediction: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Foreground voxels the model missed (reference only) and added (prediction only)."""
+    predicted, expected = prediction > 0, reference > 0
+    return expected & ~predicted, predicted & ~expected
+
+
+def label_volumes(mask: np.ndarray, affine: np.ndarray, definitions: list[dict] = LABELS) -> dict:
+    """Cheap per-label volumes (no connected components or metrics) for list sorting and summaries."""
+    voxel_ml = abs(float(np.linalg.det(affine[:3, :3]))) / 1000
+    counts = np.bincount(mask.ravel().astype(np.int64), minlength=max(label["id"] for label in definitions) + 1)
+    volumes = {str(label["id"]): float(counts[label["id"]] * voxel_ml) for label in definitions}
+    return {"volumes_ml": volumes, "total_volume_ml": float(sum(volumes.values()))}

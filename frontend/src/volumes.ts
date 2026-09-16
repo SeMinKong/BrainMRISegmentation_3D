@@ -84,7 +84,41 @@ export type RenderOptions = {
   opacity: number;
   visibleLabels: number[];
   labels: Label[];
+  /**
+   * Difference mode: `mask` is the prediction and `reference` the expert mask. Voxels in both are drawn grey,
+   * reference-only (missed) blue and prediction-only (extra) red, so disagreement needs no side-by-side comparison.
+   */
+  reference?: Volume | null;
+  diffColors?: { overlap: string; missed: string; extra: string };
+  showMissed?: boolean;
+  showExtra?: boolean;
 };
+
+/** Screen pixel (column, row) of a slice -> flat voxel index; the inverse mapping lives in `voxelAt`. */
+function flatIndex(shape: [number, number, number], plane: Plane, k: number, c: number, r: number): number {
+  const [nx, ny, nz] = shape;
+  if (plane === "axial") return ((nx - 1 - c) * ny + (ny - 1 - r)) * nz + k;
+  if (plane === "coronal") return ((nx - 1 - c) * ny + k) * nz + (nz - 1 - r);
+  return (k * ny + (ny - 1 - c)) * nz + (nz - 1 - r);
+}
+
+/** Voxel (x, y, z) under a point given as fractions of the slice image, for the linked crosshair. */
+export function voxelAt(shape: [number, number, number], plane: Plane, index: number, fx: number, fy: number): [number, number, number] {
+  const [nx, ny, nz] = shape;
+  const clamp = (v: number, n: number) => Math.max(0, Math.min(n - 1, Math.floor(v)));
+  if (plane === "axial") return [clamp((1 - fx) * nx, nx), clamp((1 - fy) * ny, ny), index];
+  if (plane === "coronal") return [clamp((1 - fx) * nx, nx), index, clamp((1 - fy) * nz, nz)];
+  return [index, clamp((1 - fx) * ny, ny), clamp((1 - fy) * nz, nz)];
+}
+
+/** Where a voxel falls on a plane's image, as fractions (0..1) of width and height; the crosshair is drawn there. */
+export function pointOf(shape: [number, number, number], plane: Plane, voxel: number[]): { fx: number; fy: number } {
+  const [nx, ny, nz] = shape;
+  const [x, y, z] = voxel;
+  if (plane === "axial") return { fx: (nx - 0.5 - x) / nx, fy: (ny - 0.5 - y) / ny };
+  if (plane === "coronal") return { fx: (nx - 0.5 - x) / nx, fy: (nz - 0.5 - z) / nz };
+  return { fx: (ny - 0.5 - y) / ny, fy: (nz - 0.5 - z) / nz };
+}
 
 const hexToRgb = (hex: string): [number, number, number] => {
   const value = parseInt(hex.replace("#", ""), 16);
@@ -93,7 +127,6 @@ const hexToRgb = (hex: string): [number, number, number] => {
 
 /** Draw one slice into `target` (resized to the slice's pixel grid). Pure CPU, ~1 ms for 240x240. */
 export function drawSlice(target: HTMLCanvasElement, volume: Volume, mask: Volume | null, plane: Plane, index: number, options: RenderOptions) {
-  const [nx, ny, nz] = volume.shape;
   const { width, height } = sliceGeometry(volume, plane);
   if (target.width !== width || target.height !== height) {
     target.width = width;
@@ -105,8 +138,12 @@ export function drawSlice(target: HTMLCanvasElement, volume: Volume, mask: Volum
   const out = image.data;
   const data = volume.data;
   const labels = mask && options.overlay && options.visibleLabels.length ? mask.data : null;
+  const reference = labels && options.reference ? options.reference.data : null;
   const colors = new Map<number, [number, number, number]>();
   for (const label of options.labels) if (options.visibleLabels.includes(label.id)) colors.set(label.id, hexToRgb(label.color));
+  const diff = options.diffColors ?? { overlap: "#9aa4ae", missed: "#3b82f6", extra: "#ef4444" };
+  const overlapColor = hexToRgb(diff.overlap), missedColor = hexToRgb(diff.missed), extraColor = hexToRgb(diff.extra);
+  const showMissed = options.showMissed ?? true, showExtra = options.showExtra ?? true;
   const alpha = Math.max(0, Math.min(1, options.opacity));
   const w = Math.max(0.01, options.window / 100);
   const lo = 0.5 - w / 2;
@@ -115,14 +152,21 @@ export function drawSlice(target: HTMLCanvasElement, volume: Volume, mask: Volum
   let o = 0;
   for (let r = 0; r < height; r++) {
     for (let c = 0; c < width; c++) {
-      let flat: number;
-      if (plane === "axial") flat = ((nx - 1 - c) * ny + (ny - 1 - r)) * nz + k;
-      else if (plane === "coronal") flat = ((nx - 1 - c) * ny + k) * nz + (nz - 1 - r);
-      else flat = (k * ny + (ny - 1 - c)) * nz + (nz - 1 - r);
+      const flat = flatIndex(volume.shape, plane, k, c, r);
       let gray = (data[flat] / 255 - lo) * scale;
       gray = gray < 0 ? 0 : gray > 255 ? 255 : gray;
       let red = gray, green = gray, blue = gray;
-      if (labels) {
+      if (reference && labels) {
+        // Foreground-level comparison restricted to the labels currently shown.
+        const predicted = colors.has(labels[flat]), expected = colors.has(reference[flat]);
+        const color = predicted && expected ? overlapColor : expected && showMissed ? missedColor : predicted && showExtra ? extraColor : null;
+        if (color) {
+          const a = predicted && expected ? alpha * 0.55 : alpha; // agreement stays quiet; disagreement stays loud
+          red = gray * (1 - a) + color[0] * a;
+          green = gray * (1 - a) + color[1] * a;
+          blue = gray * (1 - a) + color[2] * a;
+        }
+      } else if (labels) {
         const color = colors.get(labels[flat]);
         if (color) {
           red = gray * (1 - alpha) + color[0] * alpha;

@@ -98,10 +98,14 @@ CLI 추론 출력은 입력 T1의 shape·affine으로 최근접 복원합니다.
 | GET | `/api/cases/{case_id}/mesh` | 뇌 외피와 라벨별 vertex/face 배열 (gzip·캐시) |
 | GET | `/api/cases/{case_id}/volumes/{modality}` | 시퀀스 전체 uint8 볼륨; `X-Shape`, `X-Spacing`, `X-Window` 헤더 |
 | GET | `/api/cases/{case_id}/segmentations/{segmentation_id}/volume` | 마스크 전체 uint8 볼륨 |
-| GET | `/api/cases/{case_id}/stats` | 복셀 부피, 연결 성분, 선택적 비교 지표 |
+| GET | `/api/cases/{case_id}/stats` | 복셀 부피, 연결 성분, 선택적 비교 지표(놓친/더 그린 부피 포함) |
+| GET | `/api/cases/{case_id}/diff-mesh?prediction=` | 판독에만 있는(놓친) 복셀과 예측에만 있는(더 그린) 복셀의 표면 mesh (gzip·캐시) |
+| GET | `/api/cases/{case_id}/reference-summary` | 판독 마스크 라벨별 부피; 서버 시작 후 백그라운드로 채워 `case.json`에 보존 |
+| GET | `/api/overview?model_id&split` | 모델별 예측 결과 집계: 평균·중앙값·라벨별 평균·히스토그램·검사별 행(예측 시 저장된 `segmentation.metrics` 사용) |
 | GET | `/api/cases/{case_id}/segmentations/{segmentation_id}/download` | 선택한 NIfTI 마스크 |
 | GET | `/api/models` | 모델별 의존성·설정 상태와 미연결 사유; 연결된 프로젝트 체크포인트는 `training`(검증 평균 Dice, 검증 epoch, 학습/검증 사례 수)을 포함 |
-| POST | `/api/jobs` | `{case_id, model_id}`로 추론 요청 |
+| POST | `/api/jobs` | `{case_id, model_id}`로 추론 요청; 완료 시 판독 대비 지표를 분할에 저장 |
+| POST | `/api/jobs/batch` | `{model_id, case_ids, skip_predicted}`로 여러 검사를 순차 큐에 등록; 건너뛴 검사와 사유 반환 |
 | GET | `/api/jobs` | 현재 프로세스의 작업 기록 |
 | GET | `/api/jobs/{job_id}` | 작업 상태와 결과 segmentation ID |
 

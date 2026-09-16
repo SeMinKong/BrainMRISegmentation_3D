@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from collections import OrderedDict
 import json
 import logging
+import os
 from pathlib import Path
 import threading
 import time
@@ -25,7 +26,7 @@ from uuid import uuid4
 import nibabel as nib
 import numpy as np
 
-from .volumes import LABELS, LABEL_PRESETS, canonical_geometry, is_safe_case_id, make_phantom, read_canonical, validate_matching_grid
+from .volumes import LABELS, LABEL_PRESETS, canonical_geometry, is_safe_case_id, label_volumes, make_phantom, read_canonical, validate_matching_grid
 
 log = logging.getLogger(__name__)
 
@@ -201,6 +202,8 @@ class CaseStore:
                 "description": "MU-Glioma-Post study linked from the local dataset folder. The reference mask is the released tumorMask, not a model prediction.",
                 "study": {"patient_id": patient_id, "split": split, "manifest": manifest},
                 "files": {key: str(path) for key, path in files.items()}}
+        if (previous or {}).get("reference_summary") and "reference" in files:
+            case["reference_summary"] = previous["reference_summary"]  # computed once; survives restarts
         with self.lock:
             self._persist(case)
         return self.get(case_id)
@@ -228,11 +231,31 @@ class CaseStore:
             return [self.get(case_id) for case_id in self.cases]
 
     def _persist(self, case: dict) -> None:
+        """Atomic write of case.json; safe when a second server process shares the same store directory.
+
+        The temp name carries pid and thread so two processes never write the same file, and the final
+        replace retries because Windows refuses to swap a file another process is reading at that instant.
+        """
         directory = self.root / case["id"]
-        temporary = directory / "case.json.tmp"
-        temporary.write_text(json.dumps(case, indent=2), encoding="utf-8")
-        temporary.replace(directory / "case.json")
+        target = directory / "case.json"
+        payload = json.dumps(case, indent=2)
         self.cases[case["id"]] = case
+        try:
+            if target.is_file() and target.read_text(encoding="utf-8") == payload:
+                return  # unchanged (typical for relinking at startup): no write, no collision
+        except OSError:
+            pass
+        temporary = directory / f"case.json.{os.getpid()}.{threading.get_ident()}.tmp"
+        temporary.write_text(payload, encoding="utf-8")
+        for attempt in range(6):
+            try:
+                temporary.replace(target)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    temporary.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def create_case(self, name: str, modalities: Iterable[tuple[str, nib.Nifti1Image]],
                     mask: nib.Nifti1Image | None, label_preset: str, *,
@@ -343,3 +366,43 @@ class CaseStore:
             case["segmentations"] = [segment for segment in case["segmentations"] if segment["id"] != seg_id] + [item]
             self._persist(case)
         return item
+
+    def record_metrics(self, case_id: str, seg_id: str, metrics: dict) -> None:
+        """Attach precomputed comparison metrics (vs the reference) to a segmentation so overviews need no recompute."""
+        with self.lock:
+            case = self._internal(case_id)
+            for segment in case["segmentations"]:
+                if segment["id"] == seg_id:
+                    segment["metrics"] = metrics
+                    break
+            else:
+                raise KeyError("Segmentation not found")
+            self._persist(case)
+
+    def reference_summary(self, case_id: str) -> dict | None:
+        """Per-label volumes of the reference mask, computed once and stored in case.json."""
+        case = self._internal(case_id)
+        if not any(segment["id"] == "reference" for segment in case["segmentations"]):
+            return None
+        summary = case.get("reference_summary")
+        if summary is None:
+            mask = self.read_segmentation(case_id, "reference")
+            summary = label_volumes(mask, np.asarray(case["affine"]))
+            with self.lock:
+                case = self._internal(case_id)
+                case["reference_summary"] = summary
+                self._persist(case)
+        return summary
+
+    def warm_reference_summaries(self, stop: threading.Event | None = None) -> int:
+        """Background pass that fills reference summaries for every case (about 0.15 s each), skipping work on repeat runs."""
+        done = 0
+        for case_id in list(self.cases):
+            if stop is not None and stop.is_set():
+                break
+            try:
+                if self._internal(case_id).get("reference_summary") is None and self.reference_summary(case_id) is not None:
+                    done += 1
+            except (KeyError, OSError, ValueError) as exc:
+                log.warning("reference summary skipped for %s: %s", case_id, exc)
+        return done

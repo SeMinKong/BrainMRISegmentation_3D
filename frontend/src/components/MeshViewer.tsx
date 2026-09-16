@@ -3,7 +3,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { Expand, Focus, LoaderCircle, RotateCcw, Rotate3D } from "lucide-react";
 import { api, number } from "../api";
-import type { Label, MeshData } from "../api";
+import type { DiffMeshData, Label, MeshData } from "../api";
+import { DIFF } from "../labels";
 import { getCamera, holdAutoRotate, isAutoRotating, publishCamera, setAutoRotate, subscribeAutoRotate, subscribeCamera } from "../cameraSync";
 import type { CameraState } from "../cameraSync";
 
@@ -23,7 +24,17 @@ type Props = {
   title?: string;
   /** Plain names (and volumes when known) for the floating region labels and hover tooltip. */
   regions?: RegionInfo[];
+  /**
+   * Difference mode: the reference regions turn grey and two extra surfaces show where the prediction
+   * `prediction` missed (blue) or added (red) tumour. Labels MISSED/EXTRA identify them in `regions`.
+   */
+  diff?: { prediction: string; showMissed: boolean; showExtra: boolean } | null;
+  /** Bumped by the parent to frame the tumour (the "종양 위치로" button). */
+  focusKey?: number;
 };
+
+export const MISSED = -1;
+export const EXTRA = -2;
 
 type RegionMesh = { mesh: THREE.Mesh; label: number; offset: THREE.Vector3; center: THREE.Vector3 };
 
@@ -42,6 +53,20 @@ function loadMesh(caseId: string, segmentation: string): Promise<MeshData> {
   }
   return pending;
 }
+const diffCache = new Map<string, Promise<DiffMeshData>>();
+function loadDiff(caseId: string, prediction: string): Promise<DiffMeshData> {
+  const key = `${caseId}|${prediction}`;
+  let pending = diffCache.get(key);
+  if (!pending) {
+    pending = api<DiffMeshData>(`/cases/${caseId}/diff-mesh?prediction=${encodeURIComponent(prediction)}`).catch((error) => {
+      diffCache.delete(key);
+      throw error;
+    });
+    diffCache.set(key, pending);
+    while (diffCache.size > 6) diffCache.delete(diffCache.keys().next().value!);
+  }
+  return pending;
+}
 
 // RAS axes for the orientation compass: +x right, +y anterior, +z superior.
 const COMPASS = [
@@ -54,7 +79,7 @@ const COMPASS = [
 ];
 
 export default function MeshViewer(props: Props) {
-  const { caseId, segmentation, labels, visibleLabels, isolated, brainOpacity, exploded, resetKey, compact, title, regions } = props;
+  const { caseId, segmentation, labels, visibleLabels, isolated, brainOpacity, exploded, resetKey, compact, title, regions, diff, focusKey } = props;
   const host = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const labelLayer = useRef<HTMLDivElement>(null);
@@ -73,7 +98,7 @@ export default function MeshViewer(props: Props) {
     reset: () => void;
     focus: (tumorOnly: boolean) => void;
   } | null>(null);
-  const [data, setData] = useState<MeshData | null>(null);
+  const [data, setData] = useState<(MeshData & { diff?: DiffMeshData }) | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   // Auto-rotation is a property of the shared camera, not of this viewer, so it follows tab switches.
@@ -88,9 +113,10 @@ export default function MeshViewer(props: Props) {
     setLoading(true);
     setError("");
     setData(null);
-    loadMesh(caseId, segmentation)
-      .then((mesh) => {
-        if (!cancelled) setData(mesh);
+    const prediction = diff?.prediction;
+    Promise.all([loadMesh(caseId, segmentation), prediction ? loadDiff(caseId, prediction) : Promise.resolve(undefined)])
+      .then(([mesh, difference]) => {
+        if (!cancelled) setData(difference ? { ...mesh, diff: difference } : mesh);
       })
       .catch((e) => {
         if (!cancelled) setError(e.message);
@@ -101,7 +127,7 @@ export default function MeshViewer(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [caseId, segmentation]);
+  }, [caseId, segmentation, diff?.prediction]);
 
   useEffect(() => {
     if (!data || !host.current) return;
@@ -138,7 +164,7 @@ export default function MeshViewer(props: Props) {
     scene.add(fill);
     const center = new THREE.Vector3(...(data.center as [number, number, number]));
     const objects: THREE.Mesh[] = [];
-    const makeMesh = (vertices: number[], faces: number[], color: string, brain: boolean) => {
+    const makeMesh = (vertices: number[], faces: number[], color: string, brain: boolean, muted = false) => {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
       geometry.setIndex(faces);
@@ -149,9 +175,9 @@ export default function MeshViewer(props: Props) {
         color,
         roughness: brain ? 0.58 : 0.38,
         metalness: 0.0,
-        transparent: brain,
-        opacity: brain ? 0.32 : 1,
-        depthWrite: !brain,
+        transparent: brain || muted,
+        opacity: brain ? 0.32 : muted ? 0.3 : 1,
+        depthWrite: !brain && !muted,
         side: brain ? THREE.FrontSide : THREE.DoubleSide,
         clearcoat: brain ? 0.12 : 0.3,
         clearcoatRoughness: 0.6,
@@ -167,8 +193,18 @@ export default function MeshViewer(props: Props) {
     const brain = data.brain?.vertices.length ? makeMesh(data.brain.vertices, data.brain.faces, "#d7b3aa", true) : undefined;
     const present = data.regions.filter((r) => r.vertices.length > 0);
     const tumourBox = new THREE.Box3();
-    const meshes: RegionMesh[] = present.map((r) => {
-      const mesh = makeMesh(r.vertices, r.faces, labels.find((l) => l.id === r.label)?.color || "#5eead4", false);
+    // In difference mode the reference regions are a quiet grey context; the two difference surfaces carry the colour.
+    const differing = data.diff;
+    const surfaces: { vertices: number[]; faces: number[]; label: number; color: string; muted: boolean }[] = [
+      ...present.map((r) => ({ ...r, color: differing ? DIFF.overlap.color : labels.find((l) => l.id === r.label)?.color || "#5eead4", muted: !!differing })),
+      ...(differing ? [
+        { ...differing.missed, label: MISSED, color: DIFF.missed.color, muted: false },
+        { ...differing.extra, label: EXTRA, color: DIFF.extra.color, muted: false },
+      ].filter((s) => s.vertices.length > 0) : []),
+    ];
+    const meshes: RegionMesh[] = surfaces.map((r) => {
+      const mesh = makeMesh(r.vertices, r.faces, r.color, false, r.muted);
+      if (r.muted) mesh.renderOrder = 0;
       mesh.geometry.computeBoundingBox();
       const box = mesh.geometry.boundingBox!;
       tumourBox.union(box);
@@ -179,6 +215,7 @@ export default function MeshViewer(props: Props) {
     const tumourCenter = tumourBox.isEmpty() ? new THREE.Vector3() : tumourBox.getCenter(new THREE.Vector3());
     const tumourExtent = tumourBox.isEmpty() ? 40 : Math.max(...tumourBox.getSize(new THREE.Vector3()).toArray());
     meshes.forEach((item, index) => {
+      if (item.label < 0) return; // difference surfaces stay where the disagreement is
       const direction = item.center.clone().sub(tumourCenter);
       if (direction.length() < 1) direction.set(Math.cos((index / meshes.length) * Math.PI * 2), Math.sin((index / meshes.length) * Math.PI * 2), 0);
       direction.normalize();
@@ -265,7 +302,8 @@ export default function MeshViewer(props: Props) {
           tip.current.hidden = false;
           tip.current.style.left = `${event.clientX - rect.left + 14}px`;
           tip.current.style.top = `${event.clientY - rect.top + 14}px`;
-          tip.current.textContent = info ? `${info.name}${info.volume != null ? ` · ${number(info.volume, 1)} mL` : ""}` : `라벨 ${hovered.label}`;
+          tip.current.textContent = info ? `${info.name}${info.volume != null ? ` · ${number(info.volume, 1)} mL` : ""}`
+            : hovered.label === MISSED ? DIFF.missed.name : hovered.label === EXTRA ? DIFF.extra.name : `라벨 ${hovered.label}`;
         } else tip.current.hidden = true;
       }
     };
@@ -358,9 +396,12 @@ export default function MeshViewer(props: Props) {
       (r.brain.material as THREE.MeshPhysicalMaterial).opacity = brainOpacity;
     }
     r.meshes.forEach(({ mesh, label }) => {
-      mesh.visible = visibleLabels.includes(label);
+      mesh.visible = label === MISSED ? !!diff?.showMissed : label === EXTRA ? !!diff?.showExtra : visibleLabels.includes(label);
     });
-  }, [data, visibleLabels, isolated, brainOpacity, labels]);
+  }, [data, visibleLabels, isolated, brainOpacity, labels, diff?.showMissed, diff?.showExtra]);
+  useEffect(() => {
+    if (focusKey) runtime.current?.focus(true);
+  }, [focusKey]);
   // Re-frame only when the user toggles tumour-only or explode; a rebuilt scene keeps the shared camera instead.
   useEffect(() => {
     runtime.current?.focus(isolated);
@@ -372,7 +413,12 @@ export default function MeshViewer(props: Props) {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void root.current?.requestFullscreen().catch(() => setError("이 브라우저에서는 전체 화면을 지원하지 않습니다."));
   };
-  const regionLabels = (data?.regions ?? []).filter((r) => r.vertices.length > 0).map((r) => regions?.find((x) => x.id === r.label) ?? { id: r.label, name: `라벨 ${r.label}` });
+  const presentIds = [
+    ...(data?.regions ?? []).filter((r) => r.vertices.length > 0).map((r) => r.label),
+    ...(data?.diff ? [MISSED, EXTRA].filter((id) => (id === MISSED ? data.diff!.missed : data.diff!.extra).vertices.length > 0) : []),
+  ];
+  const regionLabels = presentIds.map((id) => regions?.find((x) => x.id === id) ?? { id, name: id === MISSED ? DIFF.missed.name : id === EXTRA ? DIFF.extra.name : `라벨 ${id}` });
+  const swatch = (id: number) => (id === MISSED ? DIFF.missed.color : id === EXTRA ? DIFF.extra.color : data?.diff ? DIFF.overlap.color : labels.find((l) => l.id === id)?.color);
 
   return (
     <div ref={root} className={`mesh-viewer ${compact ? "compact" : ""}`}>
@@ -392,7 +438,7 @@ export default function MeshViewer(props: Props) {
       <div ref={labelLayer} className="mesh-labels" aria-hidden="true">
         {regionLabels.map((r) => (
           <span key={r.id} className="mesh-label" hidden>
-            <span className="swatch" style={{ background: labels.find((l) => l.id === r.id)?.color }} />
+            <span className="swatch" style={{ background: swatch(r.id) }} />
             {r.name}
             {r.volume != null && <small> {number(r.volume, 1)} mL</small>}
           </span>
@@ -416,7 +462,7 @@ export default function MeshViewer(props: Props) {
           <span>{error}</span>
         </div>
       )}
-      {!loading && !error && data && data.regions.every((r) => !r.vertices.length) && (
+      {!loading && !error && data && !data.diff && data.regions.every((r) => !r.vertices.length) && (
         <div className="viewer-message">
           <span>선택한 결과에 종양 마스크가 없습니다.</span>
         </div>

@@ -1,5 +1,25 @@
 export type Label = { id: number; name: string; color: string };
-export type Segmentation = { id: string; name: string; kind: string };
+/** Per-label comparison of one prediction with the reference, stored by the server when the job finishes. */
+export type LabelMetrics = { dice?: number | null; volume_ml: number; missed_ml?: number | null; extra_ml?: number | null; reference_volume_ml?: number | null };
+export type SegmentationMetrics = {
+  dice?: number | null;
+  hd95_mm?: number | null;
+  missed_ml?: number | null;
+  extra_ml?: number | null;
+  prediction_volume_ml?: number | null;
+  reference_volume_ml?: number | null;
+  labels?: Record<string, LabelMetrics>;
+};
+export type Segmentation = {
+  id: string;
+  name: string;
+  kind: string;
+  created_at?: string;
+  provenance?: { model_id?: string; [key: string]: unknown };
+  metrics?: SegmentationMetrics;
+};
+/** Reference-mask volumes per label, filled in by the server in the background for list sorting. */
+export type ReferenceSummary = { volumes_ml: Record<string, number>; total_volume_ml: number };
 export type Case = {
   id: string;
   name: string;
@@ -13,6 +33,7 @@ export type Case = {
   segmentations: Segmentation[];
   labels: Label[];
   study?: { patient_id?: string | null; split?: string | null; manifest?: string | null };
+  reference_summary?: ReferenceSummary | null;
 };
 export const sourceLabel = (c: Case) =>
   c.demo ? "합성 데모" : c.source === "linked" ? "MU-Glioma-Post" : "NIfTI 볼륨";
@@ -59,12 +80,18 @@ export type Region = {
   components: number;
   dice?: number | null;
   hd95_mm?: number | null;
+  missed_ml?: number | null;
+  extra_ml?: number | null;
+  reference_volume_ml?: number | null;
 };
 export type Stats = {
   regions: Region[];
   total_volume_ml: number | null;
   dice?: number | null;
   hd95_mm?: number | null;
+  missed_ml?: number | null;
+  extra_ml?: number | null;
+  reference_volume_ml?: number | null;
   tumor_center_voxel?: number[] | null;
   [key: string]: unknown;
 };
@@ -74,6 +101,32 @@ export type MeshData = {
   regions: (Geometry & { label: number })[];
   center: number[];
 };
+/** Surfaces of what the model missed (reference only) and added (prediction only). */
+export type DiffMeshData = { missed: Geometry; extra: Geometry; center: number[] };
+export type OverviewCase = SegmentationMetrics & {
+  case_id: string;
+  name: string;
+  study?: Case["study"];
+  segmentation_id: string;
+  created_at?: string;
+};
+export type Overview = {
+  model_id: string;
+  split: string | null;
+  predicted: number;
+  candidates: number;
+  pending_jobs: number;
+  summary: {
+    mean_dice: number | null;
+    median_dice: number | null;
+    /** Mean of the per-label means: comparable with the validation Dice printed during training. */
+    mean_label_dice: number | null;
+    labels: Record<string, { mean: number | null; count: number }>;
+    histogram: { from: number; to: number; count: number }[];
+  };
+  cases: OverviewCase[];
+};
+export type BatchResult = { queued: number; skipped: { case_id: string; reason: string }[]; jobs: Job[] };
 export class ApiError extends Error {
   readonly status: number;
 

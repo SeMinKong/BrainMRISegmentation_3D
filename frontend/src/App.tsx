@@ -1,50 +1,79 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, PanelLeft, Upload, X } from "lucide-react";
+import { BarChart3, LoaderCircle, Maximize2, Minimize2, PanelLeft, ScanSearch, Upload, X } from "lucide-react";
 import { api } from "./api";
-import type { Case, Job, Model, Segmentation, Stats } from "./api";
+import type { BatchResult, Case, Job, Model, Overview as OverviewData, Stats } from "./api";
 import { isActiveJob, monitorInferenceJob } from "./inferenceJob";
 import type { JobConnection } from "./inferenceJob";
-import { findPatient, groupPatients } from "./patients";
+import { filterPatients, findPatient, groupPatients, latestPrediction, visibleCaseIds } from "./patients";
+import type { PatientFilter } from "./patients";
 import CaseHeader from "./components/CaseHeader";
 import ExplainView from "./components/ExplainView";
 import type { Shown, ViewState } from "./components/ExplainView";
 import { Glossary, Help } from "./components/Help";
 import ImportDialog from "./components/ImportDialog";
+import Overview from "./components/Overview";
+import type { BatchProgress } from "./components/Overview";
 import PatientBrowser from "./components/PatientBrowser";
 import ResultCard from "./components/ResultCard";
 
+type Screen = "overview" | "case";
+const SETTINGS_KEY = "mri-viewer-settings";
+const CHECKLIST_KEY = "mri-viewer-checklist-dismissed";
+type Remembered = Partial<Pick<ViewState, "modality" | "opacity" | "contrast" | "isolated" | "exploded" | "brainOpacity">> & { shown?: Shown };
+
+const readSettings = (): Remembered => {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Remembered;
+  } catch {
+    return {};
+  }
+};
+const remembered = readSettings();
+
 const defaultView = (data?: Case): ViewState => ({
-  modality: data?.modalities.includes("t1c") ? "t1c" : data?.modalities[0] ?? "t1c",
+  modality: remembered.modality && data?.modalities.includes(remembered.modality) ? remembered.modality
+    : data?.modalities.includes("t1c") ? "t1c" : data?.modalities[0] ?? "t1c",
   visibleLabels: data?.labels.map((l) => l.id) ?? [1, 2, 3, 4],
-  opacity: 0.6,
-  overlay: true,
-  isolated: false,
-  exploded: false,
-  brainOpacity: 0.32,
-  contrast: 100,
+  opacity: remembered.opacity ?? 0.6,
+  overlay: (remembered.opacity ?? 0.6) > 0,
+  isolated: remembered.isolated ?? false,
+  exploded: remembered.exploded ?? false,
+  brainOpacity: remembered.brainOpacity ?? 0.32,
+  contrast: remembered.contrast ?? 100,
+  showMissed: true,
+  showExtra: true,
   resetKey: 0,
   focusKey: 0,
 });
 
-/** The newest model output on a case; demo fixtures count on the synthetic case only. */
-const latestPrediction = (data?: Case): Segmentation | null =>
-  [...(data?.segmentations ?? [])].reverse().find((s) => s.kind === "prediction" || (data?.demo && s.kind === "demo")) ?? null;
+const defaultFilter = (hasSplits: boolean): PatientFilter => ({ query: "", split: hasSplits ? "val" : "all", predictedOnly: false, withCavity: false, sort: "id" });
 
 export default function App() {
   const [cases, setCases] = useState<Case[]>([]);
   const [caseId, setCaseId] = useState("");
+  const [screen, setScreen] = useState<Screen>("overview");
   const [models, setModels] = useState<Model[]>([]);
   const [modelId, setModelId] = useState("");
-  const [shown, setShown] = useState<Shown>("reference");
+  const [shown, setShown] = useState<Shown>(remembered.shown && remembered.shown !== "both" ? remembered.shown : "reference");
   const [view, setView] = useState<ViewState>(defaultView());
+  const [filter, setFilter] = useState<PatientFilter>(defaultFilter(true));
   const [referenceStats, setReferenceStats] = useState<Stats | null>(null);
   const [predictionStats, setPredictionStats] = useState<Stats | null>(null);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeJob, setActiveJob] = useState<Job | null>(null);
   const [monitoredJobId, setMonitoredJobId] = useState<string | null>(null);
   const [jobConnection, setJobConnection] = useState<JobConnection>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [monitorRevision, setMonitorRevision] = useState(0);
+  const [failure, setFailure] = useState<Job | null>(null);
+  const [highlight, setHighlight] = useState(false);
+  const [batch, setBatch] = useState<(BatchProgress & { ids: Set<string> }) | null>(null);
+  const [presenting, setPresenting] = useState(false);
+  const [checklist, setChecklist] = useState(() => {
+    try { return localStorage.getItem(CHECKLIST_KEY) !== "1"; } catch { return true; }
+  });
   const selectedCaseId = useRef(caseId);
   const monitoredId = useRef(monitoredJobId);
   const initializationRequest = useRef<AbortController | null>(null);
@@ -59,6 +88,8 @@ export default function App() {
 
   const data = cases.find((c) => c.id === caseId);
   const patients = useMemo(() => groupPatients(cases), [cases]);
+  const visiblePatients = useMemo(() => filterPatients(patients, filter), [patients, filter]);
+  const order = useMemo(() => visibleCaseIds(visiblePatients), [visiblePatients]);
   const patient = findPatient(patients, caseId);
   const prediction = latestPrediction(data);
   // The model used for this case: the synthetic pipeline on the phantom, otherwise the first connected checkpoint.
@@ -66,6 +97,7 @@ export default function App() {
     if (data?.demo) return models.find((m) => m.demo_only) ?? models.find((m) => m.id === modelId);
     return models.find((m) => m.id === modelId && !m.demo_only) ?? models.find((m) => m.available && !m.demo_only) ?? models.find((m) => !m.demo_only);
   }, [models, modelId, data?.demo]);
+  const trainedModel = models.find((m) => m.id === modelId && !m.demo_only) ?? models.find((m) => m.available && !m.demo_only) ?? models.find((m) => !m.demo_only);
   const ready =
     !!model?.available && !!data && (model.demo_only ? data.demo :
       !data.demo && data.label_preset === "mu_glioma_post" && ["t1n", "t1c", "t2w", "t2f"].every((m) => data.modalities.includes(m)));
@@ -74,6 +106,28 @@ export default function App() {
     selectedCaseId.current = caseId;
     monitoredId.current = monitoredJobId;
   }, [caseId, monitoredJobId]);
+
+  // Remember how the viewer was set up, so the next session opens the same way.
+  useEffect(() => {
+    try {
+      const memo: Remembered = { modality: view.modality, opacity: view.overlay ? view.opacity : 0, contrast: view.contrast, isolated: view.isolated,
+        exploded: view.exploded, brainOpacity: view.brainOpacity, shown };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(memo));
+    } catch { /* private mode: nothing to remember */ }
+  }, [view.modality, view.opacity, view.overlay, view.contrast, view.isolated, view.exploded, view.brainOpacity, shown]);
+
+  const loadOverview = useCallback(async (id: string, signal?: AbortSignal) => {
+    if (!id) return;
+    setOverviewLoading(true);
+    try {
+      const result = await api<OverviewData>(`/overview?model_id=${encodeURIComponent(id)}&split=val`, { signal });
+      if (!signal?.aborted) setOverview(result);
+    } catch (e) {
+      if (!signal?.aborted) setError((e as Error).message);
+    } finally {
+      if (!signal?.aborted) setOverviewLoading(false);
+    }
+  }, []);
 
   const initialize = useCallback(async () => {
     initializationRequest.current?.abort();
@@ -92,6 +146,7 @@ export default function App() {
       setCases(c.cases);
       setModels(m.models);
       setJobs(j.jobs);
+      setFilter(defaultFilter(c.cases.some((x) => x.study?.split)));
       const running = j.jobs.find(isActiveJob);
       setActiveJob(running || null);
       setMonitoredJobId(running?.id || null);
@@ -99,13 +154,18 @@ export default function App() {
       // Start on a case the model has not trained on, so the first result shown is a fair one.
       const unseen = c.cases.find((x) => x.study?.split === "val");
       setCaseId(running?.case_id || unseen?.id || c.cases[0]?.id || "");
-      setModelId(running?.model_id || m.models.find((x) => x.available && !x.demo_only)?.id || m.models.find((x) => !x.demo_only)?.id || m.models[0]?.id || "");
+      const trained = running?.model_id || m.models.find((x) => x.available && !x.demo_only)?.id || m.models.find((x) => !x.demo_only)?.id || m.models[0]?.id || "";
+      setModelId(trained);
+      void loadOverview(trained, controller.signal);
+      // A batch left running by an earlier session keeps being tracked.
+      const pending = j.jobs.filter(isActiveJob);
+      if (pending.length > 1) setBatch({ ids: new Set(pending.map((x) => x.id)), total: pending.length, done: 0, failed: 0, running: true });
     } catch (e) {
       if (!controller.signal.aborted) setError((e as Error).message);
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, []);
+  }, [loadOverview]);
   useEffect(() => {
     void initialize();
     return () => {
@@ -116,10 +176,14 @@ export default function App() {
 
   useEffect(() => {
     if (!data) return;
-    setShown(latestPrediction(data) ? "prediction" : "reference");
+    const latest = latestPrediction(data);
+    setShown((s) => (latest ? (s === "reference" ? "prediction" : s) : "reference"));
     setReferenceStats(null);
     setPredictionStats(null);
-    setView((v) => ({ ...defaultView(data), opacity: v.opacity, contrast: v.contrast, resetKey: v.resetKey + 1 }));
+    setFailure(null);
+    setHighlight(false);
+    setView((v) => ({ ...defaultView(data), modality: data.modalities.includes(v.modality) ? v.modality : defaultView(data).modality,
+      opacity: v.opacity, overlay: v.overlay, contrast: v.contrast, isolated: v.isolated, exploded: v.exploded, brainOpacity: v.brainOpacity, resetKey: v.resetKey + 1 }));
   }, [caseId]); // case transitions, not job refreshes
 
   const predictionId = prediction?.id ?? "";
@@ -150,6 +214,12 @@ export default function App() {
     const timer = setTimeout(() => setNotice(""), 6000);
     return () => clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    if (!highlight) return;
+    document.getElementById("result-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const timer = setTimeout(() => setHighlight(false), 2400);
+    return () => clearTimeout(timer);
+  }, [highlight]);
 
   useEffect(() => {
     if (!monitoredJobId || jobConnection?.kind === "missing" || jobConnection?.kind === "paused") return;
@@ -163,14 +233,57 @@ export default function App() {
         setMonitoredJobId(null);
         if (updated) {
           setCases((v) => v.map((c) => (c.id === updated.id ? updated : c)));
-          if (job.case_id === caseId) setShown("prediction");
-          setNotice("예측이 끝났습니다. 아래에서 판독 마스크와 비교해 보세요.");
+          if (job.case_id === caseId) {
+            setShown("prediction");
+            setHighlight(true);
+          }
+          setNotice("예측이 끝났습니다. 일치도와 차이 보기를 확인해 보세요.");
+          void loadOverview(job.model_id);
         } else if (["failed", "error"].includes(job.status)) {
-          setError(job.message || "예측에 실패했습니다.");
+          setFailure(job);
         }
       },
     });
   }, [monitoredJobId, caseId, monitorRevision]);
+
+  // Batch prediction: the server runs one job at a time; we poll the job list and refresh finished cases.
+  useEffect(() => {
+    if (!batch?.running) return;
+    let cancelled = false;
+    const seen = new Set<string>();
+    const tick = async () => {
+      try {
+        const { jobs: all } = await api<{ jobs: Job[] }>("/jobs");
+        if (cancelled) return;
+        setJobs(all);
+        const mine = all.filter((j) => batch.ids.has(j.id));
+        const finished = mine.filter((j) => !isActiveJob(j));
+        const fresh = finished.filter((j) => !seen.has(j.id) && j.status === "completed");
+        fresh.forEach((j) => seen.add(j.id));
+        if (fresh.length) {
+          const updates = await Promise.all(fresh.map((j) => api<Case>(`/cases/${j.case_id}`).catch(() => null)));
+          if (cancelled) return;
+          setCases((v) => v.map((c) => updates.find((u) => u?.id === c.id) ?? c));
+        }
+        const done = finished.length + (batch.total - mine.length); // jobs the server already forgot count as done
+        const failed = finished.filter((j) => j.status === "failed").length;
+        const running = mine.some(isActiveJob);
+        setBatch((b) => (b ? { ...b, done, failed, running } : b));
+        if (!running) {
+          setNotice(`전체 예측이 끝났습니다. ${done - failed}개 성공${failed ? `, ${failed}개 실패` : ""}.`);
+          void loadOverview(modelId);
+        }
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [batch?.running, batch?.ids]);
 
   const reconnectJobs = async () => {
     recoveryRequest.current?.abort();
@@ -208,13 +321,32 @@ export default function App() {
   const focusTumor = () => setView((v) => ({ ...v, focusKey: v.focusKey + 1 }));
   const selectCase = (id: string) => {
     setCaseId(id);
+    setScreen("case");
     if (narrow()) setSidebarOpen(false);
   };
+  const position = order.indexOf(caseId);
+  const previous = position > 0 ? () => selectCase(order[position - 1]) : undefined;
+  const next = position >= 0 && position < order.length - 1 ? () => selectCase(order[position + 1]) : undefined;
+
+  // Keyboard: ← → step through the list, Esc leaves presentation mode. Ignored while typing or scrubbing a slice.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName) || target.isContentEditable)) return;
+      if (event.key === "Escape" && presenting) setPresenting(false);
+      if (screen !== "case" || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === "ArrowLeft" && previous) { event.preventDefault(); previous(); }
+      if (event.key === "ArrowRight" && next) { event.preventDefault(); next(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [previous, next, presenting, screen]);
 
   const predict = async () => {
     if (!data || !model || !ready || active) return;
     setSubmitting(true);
     setError("");
+    setFailure(null);
     try {
       const job = await api<Job>("/jobs", {
         method: "POST",
@@ -230,28 +362,72 @@ export default function App() {
       setSubmitting(false);
     }
   };
+  const batchPredict = async () => {
+    if (!trainedModel?.available || batch?.running) return;
+    const ids = cases.filter((c) => c.study?.split === "val" && !c.demo && c.segmentations.some((s) => s.id === "reference")).map((c) => c.id);
+    if (!ids.length) return;
+    setError("");
+    try {
+      const result = await api<BatchResult>("/jobs/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: trainedModel.id, case_ids: ids, skip_predicted: true }),
+      });
+      if (!result.queued) {
+        setNotice(`새로 예측할 검사가 없습니다. ${result.skipped.length}개는 이미 예측되어 있거나 건너뛰었습니다.`);
+        return;
+      }
+      setBatch({ ids: new Set(result.jobs.map((j) => j.id)), total: result.queued, done: 0, failed: 0, running: true });
+      setNotice(`${result.queued}개 검사를 순서대로 예측합니다. 진행 중에도 다른 검사를 볼 수 있습니다.`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
   const imported = (c: Case) => {
     setCases((v) => [...v.filter((x) => x.id !== c.id), c]);
-    setCaseId(c.id);
+    selectCase(c.id);
     setImporting(false);
     setNotice(`${c.name} 볼륨을 가져왔습니다.`);
   };
+  const dismissChecklist = () => {
+    setChecklist(false);
+    try { localStorage.setItem(CHECKLIST_KEY, "1"); } catch { /* ignore */ }
+  };
   const connected = models.some((m) => m.available && !m.demo_only);
   const thisCaseJobs = jobs.filter((j) => j.case_id === caseId && isActiveJob(j));
+  const caseFailure = failure ?? [...jobs].reverse().find((j) => j.case_id === caseId && j.status === "failed" && !prediction) ?? null;
 
   return (
-    <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
+    <div className={`app-shell ${sidebarOpen && !presenting ? "" : "sidebar-collapsed"} ${presenting ? "presenting" : ""}`}>
       <header className="app-header">
         <div className="brand-group">
           <button className="neu-icon" aria-label={sidebarOpen ? "환자 목록 접기" : "환자 목록 열기"} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((v) => !v)}>
             <PanelLeft size={17} />
           </button>
           <span className="brand">내 모델 결과 보기 · 뇌 MRI 종양</span>
+          <nav className="segmented small screen-switch" aria-label="화면">
+            <button className={screen === "overview" ? "pressed" : ""} aria-pressed={screen === "overview"} onClick={() => setScreen("overview")}>
+              <BarChart3 size={15} /> 모델 성능
+            </button>
+            <button className={screen === "case" ? "pressed" : ""} aria-pressed={screen === "case"} disabled={!data} onClick={() => setScreen("case")}>
+              <ScanSearch size={15} /> 검사 보기
+            </button>
+          </nav>
         </div>
         <div className="header-side">
+          {batch?.running && (
+            <span className="batch-chip" role="status" title="전체 예측 진행 중">
+              <LoaderCircle className="spin" size={14} /> 전체 예측 {batch.done} / {batch.total}
+            </span>
+          )}
           <span className={`model-chip ${connected ? "on" : ""}`} title={connected ? "체크포인트가 연결되어 예측할 수 있습니다" : "MRI_UNET_CHECKPOINT를 .env에 설정하세요"}>
             <span className="dot" /> {connected ? "내 모델 연결됨" : "모델 미연결"} <Help term="model" />
           </span>
+          {screen === "case" && data && (
+            <button className="neu-icon" aria-label={presenting ? "발표 모드 끄기" : "발표 모드"} aria-pressed={presenting} title={presenting ? "발표 모드 끄기 (Esc)" : "발표 모드: 목록과 설명을 숨기고 영상만 크게"} onClick={() => setPresenting((v) => !v)}>
+              {presenting ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
+          )}
           <button className="neu-btn" onClick={() => setImporting(true)} aria-label="MRI 가져오기">
             <Upload size={16} /> <span>MRI 가져오기</span>
           </button>
@@ -259,7 +435,8 @@ export default function App() {
       </header>
 
       <aside className="sidebar" aria-label="환자 목록">
-        <PatientBrowser patients={patients} caseId={caseId} onSelect={selectCase} onImport={() => setImporting(true)} />
+        <PatientBrowser patients={patients} visible={visiblePatients} filter={filter} onFilter={(patch) => setFilter((f) => ({ ...f, ...patch }))}
+          caseId={caseId} onSelect={selectCase} onImport={() => setImporting(true)} />
       </aside>
 
       <main className="main-content">
@@ -288,14 +465,18 @@ export default function App() {
             <h2>환자 목록을 불러오는 중</h2>
           </div>
         )}
-        {!loading && !data && (
+        {!loading && !cases.length && (
           <div className="empty-state">
             <h2>표시할 검사가 없습니다</h2>
             <p>서버가 실행 중인지 확인한 뒤 MRI를 가져오세요.</p>
             <button className="neu-btn primary" onClick={() => setImporting(true)}>MRI 가져오기</button>
           </div>
         )}
-        {data && (
+        {!loading && cases.length > 0 && screen === "overview" && (
+          <Overview overview={overview} loading={overviewLoading} model={trainedModel} cases={cases} batch={batch} onBatch={batchPredict}
+            onOpenCase={selectCase} showChecklist={checklist} onDismissChecklist={dismissChecklist} />
+        )}
+        {data && screen === "case" && (
           <>
             <CaseHeader
               data={data}
@@ -305,9 +486,14 @@ export default function App() {
               prediction={prediction}
               active={active || thisCaseJobs.length > 0}
               submitting={submitting}
-              activeJob={activeJob}
+              activeJob={activeJob ?? thisCaseJobs[0] ?? null}
               jobConnection={jobConnection}
+              failure={caseFailure}
               onPredict={predict}
+              onDismissFailure={() => setFailure(null)}
+              position={position >= 0 ? { index: position, total: order.length } : undefined}
+              onPrevious={previous}
+              onNext={next}
             />
             <ExplainView
               data={data}
@@ -320,6 +506,9 @@ export default function App() {
                   predictionStats={predictionStats}
                   visibleLabels={view.visibleLabels}
                   onToggleLabel={toggleLabel}
+                  overview={overview}
+                  highlight={highlight}
+                  onShowDiff={prediction && data.segmentations.some((s) => s.id === "reference") ? () => setShown("diff") : undefined}
                 />
               }
               prediction={prediction}
@@ -332,14 +521,17 @@ export default function App() {
               onFocus={focusTumor}
               onReset={reset}
               onSelectCase={selectCase}
+              presenting={presenting}
             />
-            <Glossary />
+            {!presenting && <Glossary />}
           </>
         )}
-        <footer className="app-footer">
-          <span>연구·학습용 로컬 도구입니다. 진단이나 치료 판단에 쓰지 마세요.</span>
-          <a href="https://www.cancerimagingarchive.net/collection/mu-glioma-post/" target="_blank" rel="noreferrer">MU-Glioma-Post 데이터 출처</a>
-        </footer>
+        {!presenting && (
+          <footer className="app-footer">
+            <span>연구·학습용 로컬 도구입니다. 진단이나 치료 판단에 쓰지 마세요.</span>
+            <a href="https://www.cancerimagingarchive.net/collection/mu-glioma-post/" target="_blank" rel="noreferrer">MU-Glioma-Post 데이터 출처</a>
+          </footer>
+        )}
       </main>
 
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={imported} />}
