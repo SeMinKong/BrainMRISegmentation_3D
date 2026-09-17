@@ -1,6 +1,6 @@
 # BrainMRISegmentation_3D
 
-**치료 후 교종(뇌종양) MRI를 3D U-Net으로 분할하고, 학습에 쓰지 않은 검사에서 모델이 어디서 맞고 어디서 틀리는지 웹에서 확인하는 엔드투엔드 프로젝트입니다.** 데이터 점검 → 학습 파이프라인 최적화 → 모델 학습 → 검증 세트 전체 평가 → 비전문가도 읽을 수 있는 결과 뷰어까지, 한 사람이 단일 PC(RTX 5080)에서 처음부터 끝까지 만들었습니다.
+**치료 후 교종(뇌종양) MRI를 3D U-Net으로 분할하고, 학습에 쓰지 않은 검사에서 모델이 어디서 맞고 어디서 틀리는지 웹에서 확인하는 프로젝트입니다.** 데이터 점검 → 학습 파이프라인 최적화 → 모델 학습 → 검증 세트 전체 평가 → 결과 뷰어까지 단일 PC(RTX 5080)에서 직접 만들었습니다.
 
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](#) [![PyTorch](https://img.shields.io/badge/PyTorch-2.14%20%2B%20CUDA%2013-EE4C2C?logo=pytorch&logoColor=white)](#) [![MONAI](https://img.shields.io/badge/MONAI-1.6-2f9e83)](#) [![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white)](#) [![React](https://img.shields.io/badge/React-19%20%2B%20three.js-61DAFB?logo=react&logoColor=black)](#) [![Tests](https://img.shields.io/badge/tests-67%20py%20%2B%2019%20ts-brightgreen)](#)
 
